@@ -570,3 +570,26 @@ class Testติดอยู่ในโหมดรอยืนยัน:
 
         assert "เรียบร้อยแล้ว" in done.reply
         assert store.facts_for(speaker.id) == []
+
+
+class Testข้อความขอยืนยันการลบ:
+    """ถูกลืมไว้ตอนเขียน _removed_summary ใหม่ สองประโยคที่ติดกันจึงขัดกันเอง"""
+
+    def test_ไม่มีอะไรให้ลบต้องไม่นับศูนย์พร้อมลักษณนาม(self, session, store):
+        speaker = session.register_speaker("เดช")
+        asked = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        assert "ศูนย์" not in asked.reply, asked.reply
+        assert "0" not in asked.reply, asked.reply
+
+    def test_มีอย่างเดียวต้องพูดว่าเรื่องเดียว(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        asked = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        assert "เรื่องเดียว" in asked.reply, asked.reply
+
+    def test_ปฏิเสธแล้วต้องจบด้วยคำลงท้าย(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        answer = session.exchange("ไม่", speaker=speaker, speak=False)
+        assert answer.reply.rstrip().endswith(("ค่ะ", "ครับ")), answer.reply

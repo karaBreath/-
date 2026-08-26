@@ -134,6 +134,15 @@
 /** คำลงท้ายของผู้ช่วย — /health เป็นตัวบอก ค่านี้เป็นแค่ค่าตั้งต้นก่อนตอบกลับมา */
 let assistantParticle = "ค่ะ";
 
+/** คำเรียกที่เป็นส่วนหนึ่งของชื่ออยู่แล้ว — กัน "คุณพี่เดช" */
+const HAS_TITLE = ["คุณ", "พี่", "น้อง", "นาย", "นาง", "นางสาว", "ลุง"];
+
+/** เติม "คุณ" นำหน้าชื่อ เว้นแต่ชื่อนั้นมีคำเรียกอยู่แล้ว */
+function address(name) {
+  const clean = String(name ?? "");
+  return HAS_TITLE.some((t) => clean.startsWith(t)) ? clean : `คุณ${clean}`;
+}
+
 import { ThaiVoiceClient } from "./js/client.js";
 import { VoiceConversation, browserRecognitionAvailable } from "./js/browserVoice.js";
 
@@ -250,7 +259,7 @@ const handlers = {
     if (speaker) {
       const how = method === "voice" ? `จำเสียงได้ (${(score ?? 0).toFixed(2)})`
                 : method === "name" ? "รู้จากชื่อที่บอก" : "คนเดิมในบทสนทนานี้";
-      addTurn("ระบบ", `กำลังคุยกับคุณ${speaker.name} — ${how}`);
+      addTurn("ระบบ", `กำลังคุยกับ${address(speaker.name)} — ${how}`);
     }
     void refreshSpeaker(speaker);
   },
@@ -351,7 +360,7 @@ document.getElementById("textinput").addEventListener("keydown", (event) => {
 forgetBtn.addEventListener("click", async () => {
   if (!currentSpeaker) return;
   if (!confirm(
-    `ลบความจำทั้งหมดเกี่ยวกับคุณ${currentSpeaker.name} ใช่ไหม\n\n` +
+    `ลบความจำทั้งหมดเกี่ยวกับ${address(currentSpeaker.name)} ใช่ไหม\n\n` +
     "ทั้งสิ่งที่จำไว้ บทสรุป และบทสนทนาเก่า ลบแล้วกู้คืนไม่ได้\n" +
     "(ลายเสียงที่ใช้จำว่าคุณเป็นใครจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี)"
   )) return;

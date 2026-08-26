@@ -205,6 +205,27 @@ def _address(name: str) -> str:
     return name if name.startswith(_HAS_TITLE) else f"คุณ{name}"
 
 
+def _pending_summary(stats: "SpeakerStats") -> str:
+    """สรุปว่ากำลังจะลบอะไร — ต้องไม่นับศูนย์พร้อมลักษณนาม
+
+    ข้อความนี้ถูกลืมไว้ตอนเขียน _removed_summary ใหม่ ผลคือสองประโยคที่อยู่
+    ติดกันขัดกันเอง: ตอนถามบอกว่า "สิ่งที่จำไว้ ศูนย์ เรื่อง" แล้วตอนตอบบอกว่า
+    "ไม่มีอะไรให้ลบอยู่แล้ว"
+    """
+    parts: list[str] = []
+    if stats.facts > 0:
+        amount = "เรื่องเดียว" if stats.facts == 1 else f" {stats.facts} เรื่อง"
+        parts.append(f"สิ่งที่จำไว้{amount}")
+    if stats.turns > 0:
+        amount = "ข้อความเดียว" if stats.turns == 1 else f" {stats.turns} ข้อความ"
+        parts.append(f"บทสนทนา{amount}")
+    if not parts:
+        return "ทั้งหมด"
+    if len(parts) == 1:
+        return f"ทั้งหมด ทั้ง{parts[0]} และบทสรุปที่เคยสรุปไว้"
+    return f"ทั้งหมด ทั้ง{parts[0]} ทั้ง{parts[1]} และบทสรุปที่เคยสรุปไว้"
+
+
 def _removed_summary(removed: dict[str, int], particle: str = "ค่ะ") -> str:
     """สรุปว่าลบอะไรไปบ้าง โดยไม่พูดถึงของที่ไม่มี
 
@@ -514,7 +535,7 @@ class ConversationSession:
                 del self._pending_forget[speaker.id]
                 self._forget_nudged.discard(speaker.id)
                 return self._say(
-                    f"ได้{particle} งั้นไม่ลบนะ{_soft(particle)} ความจำทั้งหมดยังอยู่ครบ",
+                    f"ได้{particle} งั้นไม่ลบนะ{_soft(particle)} ความจำทั้งหมดยังอยู่ครบ{particle}",
                     speaker,
                     speak,
                     user_text=transcript,
@@ -565,9 +586,8 @@ class ConversationSession:
         self._forget_nudged.discard(speaker.id)
         stats = self.store.stats(speaker.id)
         return self._say(
-            f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}ทั้งหมด "
-            f"ทั้งสิ่งที่จำไว้ {stats.facts} เรื่อง บทสรุปทั้งหมด "
-            f"และบทสนทนา {stats.turns} ข้อความ "
+            f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}"
+            f"{_pending_summary(stats)} "
             f"ลบแล้วกู้คืนไม่ได้ "
             f"ส่วนเสียงที่ใช้จำว่าเป็นคุณจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี "
             f'ถ้าแน่ใจ พูดว่า "ยืนยัน" ได้เลย{particle}',

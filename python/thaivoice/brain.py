@@ -26,13 +26,28 @@ from .thai_text import SpeechChunker, clean_for_speech
 
 log = logging.getLogger("thaivoice.brain")
 
-__all__ = ["ThaiBrain", "BrainEvent", "MissingCredentialsError", "REFUSAL_REPLY"]
+__all__ = [
+    "ThaiBrain",
+    "BrainEvent",
+    "MissingCredentialsError",
+    "REFUSAL_REPLY",
+    "refusal_reply",
+]
 
 # beta flag สำหรับ server-side fallback: ถ้าคำขอถูกปฏิเสธด้วยตัวจำแนกความปลอดภัย
 # เซิร์ฟเวอร์จะสลับไปโมเดลที่เหมาะสมให้เอง แทนที่บทสนทนาจะเงียบไปเฉย ๆ
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-REFUSAL_REPLY = "ขอโทษค่ะ เรื่องนี้ตอบให้ไม่ได้ ลองถามเรื่องอื่นได้เลยค่ะ"
+def refusal_reply(particle: str = "ค่ะ") -> str:
+    """ข้อความปฏิเสธ — ต้องใช้คำลงท้ายของผู้ช่วย ไม่ใช่ฮาร์ดโค้ดเป็นเพศหญิง
+
+    ถ้าตั้งผู้ช่วยเป็นผู้ชาย เสียงจะเป็นเสียงผู้ชายแต่พูดว่า "ค่ะ"
+    ซึ่งเป็นความไม่เข้าคู่ที่ prompt เองเรียกว่า "สะดุดหูทันทีที่ได้ยิน"
+    """
+    return f"ขอโทษ{particle} เรื่องนี้ตอบให้ไม่ได้ ลองถามเรื่องอื่นได้เลย{particle}"
+
+
+REFUSAL_REPLY = refusal_reply()
 
 _NO_CREDENTIALS_HINT = (
     "ยังไม่ได้ตั้งค่าคีย์สำหรับเรียก Claude\n"
@@ -195,7 +210,7 @@ class ThaiBrain:
 
         text = "".join(parts).strip()
         if not text and getattr(final, "stop_reason", None) == "refusal":
-            text = REFUSAL_REPLY
+            text = refusal_reply(self.settings.assistant_particle)
             yield BrainEvent("chunk", text)
         yield BrainEvent("done", text)
 

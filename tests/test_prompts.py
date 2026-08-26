@@ -140,3 +140,13 @@ class Testกฎภาษาไทยใน_system_prompt:
             line for line in prompt.splitlines() if "ตรงข้าม" not in line
         )
         assert "คะ" not in body.replace("ครับ", "")
+
+
+class Testข้อความปฏิเสธ:
+    def test_ต้องใช้คำลงท้ายของผู้ช่วยไม่ใช่ฮาร์ดโค้ด(self):
+        """ผู้ช่วยผู้ชายเคยพูดว่า "ค่ะ" ด้วยเสียงผู้ชาย"""
+        from thaivoice.brain import refusal_reply
+
+        assert refusal_reply("ครับ").count("ครับ") == 2
+        assert "ค่ะ" not in refusal_reply("ครับ")
+        assert refusal_reply("ค่ะ").count("ค่ะ") == 2
