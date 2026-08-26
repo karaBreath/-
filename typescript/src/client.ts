@@ -200,12 +200,27 @@ export class ThaiVoiceClient {
     return data.deleted;
   }
 
-  /** ลบเฉพาะข้อเท็จจริงที่จำไว้ แต่ยังรู้จักคนนี้อยู่ */
+  /** ลบเฉพาะข้อเท็จจริงที่จำไว้ (บทสนทนาและบทสรุปยังอยู่) */
   async forgetFacts(id: number): Promise<number> {
     const data = await this.request<{ removed: number }>(
       "DELETE",
       `/api/speakers/${id}/facts`,
     );
+    return data.removed;
+  }
+
+  /**
+   * ลบความจำทั้งหมด — ข้อเท็จจริง บทสรุป และบทสนทนา แต่ยังรู้จักตัวคนอยู่
+   *
+   * นี่คือสิ่งที่ผู้ใช้คาดหวังเมื่อกด "ลืมทุกอย่างเกี่ยวกับฉัน" การลบแค่ข้อเท็จจริง
+   * ทำให้บทสรุปและบทสนทนาเก่ายังไหลกลับเข้า prompt ได้
+   */
+  async forgetMemory(
+    id: number,
+  ): Promise<{ facts: number; summaries: number; turns: number }> {
+    const data = await this.request<{
+      removed: { facts: number; summaries: number; turns: number };
+    }>("DELETE", `/api/speakers/${id}/memory`);
     return data.removed;
   }
 

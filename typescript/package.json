@@ -12,6 +12,8 @@
   "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.web.json",
+    "prepare": "npm run build",
+    "test": "node --test \"test/*.test.mjs\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist web/js"
   },

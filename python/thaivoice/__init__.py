@@ -60,6 +60,7 @@ def create_session(
     session_id: str | None = None,
     with_tts: bool = True,
     with_memory_extraction: bool = True,
+    sticky_speaker: bool = True,
 ) -> ConversationSession:
     """ประกอบระบบทั้งหมดให้พร้อมใช้ในบรรทัดเดียว
 
@@ -68,6 +69,9 @@ def create_session(
 
     ส่ง ``client`` เข้ามาได้ถ้าต้องการใช้ไคลเอนต์ Anthropic ที่ตั้งค่าเอง
     (หรือของปลอมในเทสต์)
+
+    ``sticky_speaker`` ควรเป็น ``False`` เมื่อบทสนทนาเดียวถูกใช้ร่วมกันหลายคน
+    ไม่งั้นคนที่ระบุตัวตนไม่ได้จะสวมรอยเป็นคนก่อนหน้าและเห็นความจำของเขา
     """
     settings = settings or get_settings()
     store = store or MemoryStore(settings.db_path)
@@ -88,4 +92,5 @@ def create_session(
         tts=load_tts(settings) if with_tts else None,
         settings=settings,
         session_id=session_id,
+        sticky_speaker=sticky_speaker,
     )

@@ -141,3 +141,40 @@ class TestFallbacks:
         speaker = store.create_speaker("เดช")
         assert extractor.run_now(speaker, []) is None
         assert fake_client.calls == []
+
+
+class TestStrictSchema:
+    """schema ที่ส่งไปกับ structured outputs ต้องเข้มงวดพอ ไม่งั้นถูกปฏิเสธเป็น 400"""
+
+    def test_ทุกอ็อบเจ็กต์ต้องปิดฟิลด์เกิน(self):
+        from thaivoice.extraction import MemoryUpdate, strict_json_schema
+
+        schema = strict_json_schema(MemoryUpdate)
+
+        def objects(node, path="root"):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    yield path, node
+                for key, value in node.items():
+                    yield from objects(value, f"{path}.{key}")
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    yield from objects(value, f"{path}[{index}]")
+
+        found = list(objects(schema))
+        assert found, "ต้องมีอ็อบเจ็กต์อย่างน้อยหนึ่งตัว"
+        for path, node in found:
+            assert node.get("additionalProperties") is False, path
+            assert node.get("required"), path
+
+    def test_ไม่ทำลาย_schema_เดิม(self):
+        from thaivoice.extraction import MemoryUpdate, strict_json_schema
+
+        schema = strict_json_schema(MemoryUpdate)
+        assert set(schema["properties"]) == {
+            "facts",
+            "forget_keys",
+            "display_name",
+            "nickname",
+            "gender",
+        }

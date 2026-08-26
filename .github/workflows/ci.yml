@@ -54,6 +54,28 @@ jobs:
           thaivoice --help > /dev/null
           thaivoice doctor
           thaivoice speakers
+      - name: ฐานข้อมูลเวอร์ชันเก่าต้อง migrate ได้
+        run: |
+          python - <<'PY'
+          import sqlite3, tempfile, pathlib
+          from thaivoice.memory import MemoryStore
+          path = pathlib.Path(tempfile.mkdtemp()) / "v1.db"
+          conn = sqlite3.connect(path)
+          conn.executescript("""
+            CREATE TABLE speakers (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              display_name TEXT NOT NULL, nickname TEXT, gender TEXT, particle TEXT,
+              language TEXT NOT NULL DEFAULT 'th', notes TEXT,
+              meta_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL,
+              last_seen_at REAL NOT NULL);
+            INSERT INTO speakers(display_name, created_at, last_seen_at)
+              VALUES ('เดชา', 1, 1);
+          """)
+          conn.commit(); conn.close()
+          store = MemoryStore(path)
+          assert store.find_speaker_by_name("เดชา") is not None
+          assert store.get_or_create_speaker("เดชา")[1] is False
+          print("migrate จาก schema v1 สำเร็จ")
+          PY
 
   typescript:
     name: TypeScript
@@ -79,3 +101,5 @@ jobs:
           test -f dist/index.d.ts
           test -f web/js/client.js
           test -f web/js/browserVoice.js
+      - name: เทสต์ตรรกะฝั่งเบราว์เซอร์
+        run: npm test

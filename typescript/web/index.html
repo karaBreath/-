@@ -59,6 +59,8 @@
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #07131f; font-weight: 600; }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  button[hidden] { display: none; }
+  button.recording { background: #b3402f; border-color: #b3402f; color: #fff; }
 
   .state { font-size: 14px; color: var(--muted); }
   .state.listening { color: var(--ok); }
@@ -93,6 +95,7 @@
       <div id="log"><p class="empty">กดปุ่ม “เริ่มคุย” แล้วพูดได้เลย ระบบฟังภาษาไทย</p></div>
       <div class="controls">
         <button id="startBtn" class="primary">เริ่มคุย</button>
+        <button id="talkBtn" hidden>กดค้างเพื่อพูด</button>
         <button id="stopBtn" disabled>หยุด</button>
         <span class="state" id="state">พร้อม</span>
       </div>
@@ -137,15 +140,35 @@ const stateEl = document.getElementById("state");
 const speakerBox = document.getElementById("speakerBox");
 const factBox = document.getElementById("factBox");
 const forgetBtn = document.getElementById("forgetBtn");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const talkBtn = document.getElementById("talkBtn");
 
 let currentSpeaker = null;
 let talk = null;
 let interimEl = null;
 let botEl = null;
 
+const canRecognize = browserRecognitionAvailable();
+
 const STATE_LABEL = {
   idle: "พร้อม", listening: "กำลังฟัง…", thinking: "กำลังคิด…", speaking: "กำลังพูด…",
 };
+
+/**
+ * สร้าง element พร้อมข้อความแบบปลอดภัย
+ *
+ * ทุกอย่างที่มาจากเซิร์ฟเวอร์ (ชื่อผู้พูด ข้อเท็จจริง) ต้องผ่านทางนี้เท่านั้น
+ * ห้ามใช้ innerHTML เด็ดขาด เพราะชื่อและข้อเท็จจริงมาจากคำพูดของผู้ใช้ผ่านการ
+ * สกัดด้วยโมเดล ใครก็ตั้งชื่อตัวเองเป็น <img onerror=...> ได้ แล้วสคริปต์นั้น
+ * จะรันในหน้าจอของทุกคนที่คุยกับระบบเดียวกัน
+ */
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = String(text);
+  return node;
+}
 
 function clearEmpty() {
   const empty = log.querySelector(".empty");
@@ -154,11 +177,8 @@ function clearEmpty() {
 
 function addTurn(who, text, cls = "") {
   clearEmpty();
-  const wrap = document.createElement("div");
-  wrap.className = `turn ${cls}`;
-  wrap.innerHTML = `<div class="who"></div><div class="bubble"></div>`;
-  wrap.querySelector(".who").textContent = who;
-  wrap.querySelector(".bubble").textContent = text;
+  const wrap = el("div", `turn ${cls}`.trim());
+  wrap.append(el("div", "who", who), el("div", "bubble", text));
   log.append(wrap);
   log.scrollTop = log.scrollHeight;
   return wrap;
@@ -171,25 +191,36 @@ function setState(state) {
 
 async function refreshSpeaker(speaker) {
   currentSpeaker = speaker;
+  speakerBox.replaceChildren();
   if (!speaker) {
-    speakerBox.innerHTML = `<p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูสิครับ</p>`;
+    speakerBox.append(el("p", "empty", "ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูสิ"));
     forgetBtn.disabled = true;
     return;
   }
-  speakerBox.innerHTML = `
-    <div style="font-size:17px;font-weight:600">${speaker.name}</div>
-    <div class="empty">คำลงท้าย: ${speaker.particle ?? "-"} · คุยกันมาแล้ว ${speaker.turns ?? 0} เทิร์น</div>`;
+  const name = el("div", null, speaker.name);
+  name.style.fontSize = "17px";
+  name.style.fontWeight = "600";
+  speakerBox.append(
+    name,
+    el("div", "empty", `คำลงท้ายที่เขาใช้: ${speaker.particle ?? "-"} · คุยกันมาแล้ว ${speaker.turns ?? 0} เทิร์น`),
+  );
   forgetBtn.disabled = false;
 
   try {
     const detail = await client.speaker(speaker.id);
-    factBox.innerHTML = detail.facts.length
-      ? detail.facts
-          .map((f) => `<div class="fact"><span class="k">${f.key}:</span> ${f.value}</div>`)
-          .join("")
-      : `<p class="empty">ยังไม่มีอะไรจำไว้</p>`;
-  } catch {
-    /* ไม่เป็นไร แสดงของเดิมไว้ */
+    factBox.replaceChildren();
+    if (!detail.facts.length) {
+      factBox.append(el("p", "empty", "ยังไม่มีอะไรจำไว้"));
+      return;
+    }
+    for (const fact of detail.facts) {
+      const row = el("div", "fact");
+      row.append(el("span", "k", `${fact.key}: `), document.createTextNode(fact.value));
+      factBox.append(row);
+    }
+  } catch (error) {
+    // แสดงของเดิมไว้ ไม่ต้องรบกวนผู้ใช้
+    console.warn("โหลดความจำไม่สำเร็จ", error);
   }
 }
 
@@ -200,9 +231,10 @@ const handlers = {
       interimEl = null;
       addTurn("คุณ", text, "me");
       botEl = null;
+    } else if (!interimEl) {
+      interimEl = addTurn("คุณ", text, "me interim");
     } else {
-      if (!interimEl) interimEl = addTurn("คุณ", text, "me interim");
-      else interimEl.querySelector(".bubble").textContent = text;
+      interimEl.querySelector(".bubble").textContent = text;
     }
   },
   onSpeaker(speaker, method, score) {
@@ -219,7 +251,7 @@ const handlers = {
     log.scrollTop = log.scrollHeight;
   },
   onReply(text) {
-    if (!botEl) addTurn("ใจ", text);
+    if (!botEl && text) addTurn("ใจ", text);
     botEl = null;
     if (currentSpeaker) void refreshSpeaker(currentSpeaker);
   },
@@ -227,29 +259,55 @@ const handlers = {
   onError(error) { addTurn("ระบบ", `เกิดข้อผิดพลาด: ${error.message}`); },
 };
 
-document.getElementById("startBtn").addEventListener("click", async () => {
+startBtn.addEventListener("click", async () => {
   talk = new VoiceConversation(client, {
     ...handlers,
     serverTts: document.getElementById("optServerTts").checked,
     bargeIn: document.getElementById("optBargeIn").checked,
-    useBrowserRecognition: browserRecognitionAvailable(),
+    useBrowserRecognition: canRecognize,
   });
   try {
     await talk.start();
-    document.getElementById("startBtn").disabled = true;
-    document.getElementById("stopBtn").disabled = false;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    // เบราว์เซอร์ที่ถอดเสียงเองไม่ได้ต้องใช้โหมดกดพูด ไม่งั้นจะอัดค้างไว้เฉย ๆ
+    // โดยไม่ส่งอะไรเลย ซึ่งเป็นอาการที่ Firefox และ Safari เจอ
+    talkBtn.hidden = canRecognize;
   } catch (error) {
+    talk = null;
     addTurn("ระบบ", `เปิดไมโครโฟนไม่ได้: ${error.message}`);
   }
 });
 
-document.getElementById("stopBtn").addEventListener("click", () => {
+stopBtn.addEventListener("click", () => {
   talk?.stop();
   talk = null;
-  document.getElementById("startBtn").disabled = false;
-  document.getElementById("stopBtn").disabled = true;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  talkBtn.hidden = true;
+  talkBtn.classList.remove("recording");
   setState("idle");
 });
+
+// โหมดกดพูด: กดค้างเพื่อพูด ปล่อยเพื่อส่ง
+function beginPushToTalk(event) {
+  event.preventDefault();
+  if (!talk) return;
+  talkBtn.classList.add("recording");
+  talkBtn.textContent = "ปล่อยเพื่อส่ง";
+  setState("listening");
+}
+async function endPushToTalk(event) {
+  event.preventDefault();
+  if (!talk || !talkBtn.classList.contains("recording")) return;
+  talkBtn.classList.remove("recording");
+  talkBtn.textContent = "กดค้างเพื่อพูด";
+  await talk.pushToTalkStop();
+}
+talkBtn.addEventListener("pointerdown", beginPushToTalk);
+talkBtn.addEventListener("pointerup", endPushToTalk);
+talkBtn.addEventListener("pointercancel", endPushToTalk);
+talkBtn.addEventListener("pointerleave", endPushToTalk);
 
 async function sendTyped() {
   const input = document.getElementById("textinput");
@@ -260,10 +318,7 @@ async function sendTyped() {
   botEl = null;
   setState("thinking");
   try {
-    const result = await client.chat(text, {
-      speakerId: currentSpeaker?.id,
-      speak: false,
-    });
+    const result = await client.chat(text, { speakerId: currentSpeaker?.id, speak: false });
     addTurn("ใจ", result.reply);
     void refreshSpeaker(result.speaker);
   } catch (error) {
@@ -275,23 +330,29 @@ async function sendTyped() {
 
 document.getElementById("sendBtn").addEventListener("click", sendTyped);
 document.getElementById("textinput").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") sendTyped();
+  // isComposing กันการกด Enter ระหว่างเลือกคำจาก IME ภาษาไทย/ญี่ปุ่น
+  if (event.key === "Enter" && !event.isComposing) sendTyped();
 });
 
 forgetBtn.addEventListener("click", async () => {
   if (!currentSpeaker) return;
-  if (!confirm(`ลบความจำทั้งหมดเกี่ยวกับ ${currentSpeaker.name}?`)) return;
-  const removed = await client.forgetFacts(currentSpeaker.id);
-  addTurn("ระบบ", `ลบความจำแล้ว ${removed} รายการ`);
-  void refreshSpeaker(currentSpeaker);
+  if (!confirm(`ลบความจำทั้งหมดเกี่ยวกับ ${currentSpeaker.name}? เอากลับไม่ได้`)) return;
+  try {
+    const removed = await client.forgetMemory(currentSpeaker.id);
+    const total = removed.facts + removed.summaries + removed.turns;
+    addTurn("ระบบ", `ลบความจำแล้ว ${total} รายการ (สิ่งที่จำไว้ ${removed.facts}, บทสรุป ${removed.summaries}, บทสนทนา ${removed.turns})`);
+    await refreshSpeaker(currentSpeaker);
+  } catch (error) {
+    addTurn("ระบบ", `ลบความจำไม่สำเร็จ: ${error.message}`);
+  }
 });
 
 // ── ตรวจสภาพตอนเปิดหน้า ────────────────────────────────────────────────
-document.getElementById("recogBadge").textContent = browserRecognitionAvailable()
+const recogBadge = document.getElementById("recogBadge");
+recogBadge.textContent = canRecognize
   ? "เบราว์เซอร์ถอดเสียงไทยได้"
-  : "เบราว์เซอร์ถอดเสียงเองไม่ได้ (จะใช้เซิร์ฟเวอร์)";
-document.getElementById("recogBadge").className =
-  "badge " + (browserRecognitionAvailable() ? "on" : "warn");
+  : "เบราว์เซอร์ถอดเสียงเองไม่ได้ — ใช้โหมดกดพูด";
+recogBadge.className = "badge " + (canRecognize ? "on" : "warn");
 
 fetch(`${location.origin}/health`)
   .then((r) => r.json())

@@ -22,7 +22,7 @@ from .memory import MemoryStore, Speaker, Turn
 
 log = logging.getLogger("thaivoice.extraction")
 
-__all__ = ["MemoryUpdate", "MemoryExtractor", "ExtractedFact"]
+__all__ = ["MemoryUpdate", "MemoryExtractor", "ExtractedFact", "strict_json_schema"]
 
 CATEGORIES = (
     "ข้อมูลส่วนตัว",
@@ -93,6 +93,35 @@ _SUMMARY_SYSTEM = """\
 ไม่ต้องใส่ข้อเท็จจริงที่ถูกเก็บแยกไว้แล้ว (ชื่อ อาชีพ ความชอบ)
 ตอบมาเป็นข้อความสรุปอย่างเดียว ไม่ต้องมีหัวข้อหรือคำนำ
 """
+
+
+def strict_json_schema(model: type[BaseModel]) -> dict:
+    """แปลง schema ของ pydantic ให้เข้มงวดพอสำหรับ structured outputs
+
+    schema ที่ ``model_json_schema()`` คืนมาไม่มี ``additionalProperties: false``
+    ซึ่งโหมดเข้มงวดของ API ต้องการ ถ้าส่งไปดิบ ๆ จะโดนปฏิเสธเป็น 400 ซึ่งแปลว่า
+    เส้นทางสำรองนี้จะพังพร้อมกับเส้นทางหลัก และการสกัดความจำจะหยุดทำงานเงียบ ๆ
+
+    ตั้งใจเขียนเองแทนที่จะ import ตัวแปลงภายในของ SDK เพราะเป็น private API
+    ที่อาจย้ายที่เมื่อไหร่ก็ได้
+    """
+    schema = model.model_json_schema()
+    _harden_schema(schema)
+    return schema
+
+
+def _harden_schema(node: object) -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "object":
+            node.setdefault("additionalProperties", False)
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                node.setdefault("required", sorted(properties))
+        for value in node.values():
+            _harden_schema(value)
+    elif isinstance(node, list):
+        for value in node:
+            _harden_schema(value)
 
 
 def _format_turns(turns: Sequence[Turn]) -> str:
@@ -183,7 +212,7 @@ class MemoryExtractor:
                     "effort": "low",
                     "format": {
                         "type": "json_schema",
-                        "schema": MemoryUpdate.model_json_schema(),
+                        "schema": strict_json_schema(MemoryUpdate),
                     },
                 },
                 **{k: v for k, v in kwargs.items() if k != "output_config"},

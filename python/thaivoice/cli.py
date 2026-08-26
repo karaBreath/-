@@ -43,6 +43,18 @@ def _p(text: str = "") -> None:
     print(text, flush=True)
 
 
+def _close(session) -> None:
+    """คืนทรัพยากรของบทสนทนา — thread pool ของตัวสกัดความจำต้องถูกปิด
+    ไม่งั้นโปรแกรมอาจค้างตอนออกเพราะรอเธรดที่ยังทำงานอยู่
+    """
+    try:
+        if session.extractor is not None:
+            session.extractor.shutdown(wait=False)
+        session.store.close()
+    except Exception:
+        pass
+
+
 def _width(text: str) -> int:
     """ความกว้างที่แสดงจริงบนเทอร์มินัล
 
@@ -154,6 +166,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # ── คุยด้วยข้อความ ──────────────────────────────────────────────────────────
 def cmd_chat(args: argparse.Namespace) -> int:
     """โหมดพิมพ์คุย — ใช้ทดสอบสมองและความจำโดยไม่ต้องมีไมโครโฟน"""
+    settings = get_settings()
     session = create_session(with_tts=args.speak)
     speaker = None
     if args.speaker:
@@ -192,7 +205,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 elif event.type == "done":
                     _p("\n")
     except KeyboardInterrupt:
-        _p("\nลาก่อนครับ")
+        _p(f"\n{DIM}ลาก่อน{settings.assistant_particle}{RESET}")
+    finally:
+        _close(session)
     return 0
 
 
@@ -218,7 +233,7 @@ def cmd_talk(args: argparse.Namespace) -> int:
     mic = Microphone(settings)
     player = AudioPlayer()
 
-    _p(f"{BOLD}เริ่มคุยได้เลยครับ{RESET} {DIM}(กด Ctrl-C เพื่อออก){RESET}")
+    _p(f"{BOLD}เริ่มคุยได้เลย{settings.assistant_particle}{RESET} {DIM}(กด Ctrl-C เพื่อออก){RESET}")
     if not session.identifier.enabled:
         _p(f"{DIM}หมายเหตุ: ยังไม่ได้เปิดการจำลายเสียง ระบบจะรู้จักคุณจากการบอกชื่อ{RESET}")
     _p()
@@ -254,9 +269,11 @@ def cmd_talk(args: argparse.Namespace) -> int:
                 elif event.type == "done":
                     _p("\n")
     except KeyboardInterrupt:
-        _p(f"\n{DIM}ลาก่อนครับ{RESET}")
+        _p(f"\n{DIM}ลาก่อน{settings.assistant_particle}{RESET}")
+    finally:
         mic.stop()
         player.stop()
+        _close(session)
     return 0
 
 
@@ -266,7 +283,7 @@ def cmd_speakers(args: argparse.Namespace) -> int:
     store = MemoryStore(settings.db_path)
     speakers = store.list_speakers()
     if not speakers:
-        _p("ยังไม่รู้จักใครเลยครับ")
+        _p(f"ยังไม่รู้จักใครเลย{settings.assistant_particle}")
         return 0
     header = (
         _pad("id", 5) + _pad("ชื่อ", 20) + _pad("คำลงท้าย", 12)
@@ -295,6 +312,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
     speaker = store.get_speaker(args.speaker_id)
     if speaker is None:
         _p(f"ไม่พบผู้สนทนา id={args.speaker_id}")
+        store.close()
         return 1
 
     stats = store.stats(speaker.id)
@@ -325,7 +343,6 @@ def cmd_memory(args: argparse.Namespace) -> int:
 
 def cmd_enroll(args: argparse.Namespace) -> int:
     """สอนให้ระบบจำเสียงคนหนึ่งจากไฟล์ WAV"""
-    settings = get_settings()
     session = create_session(with_tts=False, with_memory_extraction=False)
     if not session.identifier.enabled:
         _p(f"{YELLOW}ยังใช้การจำลายเสียงไม่ได้ — ติดตั้งด้วย pip install 'thaivoice[speaker]'{RESET}")
@@ -343,7 +360,8 @@ def cmd_enroll(args: argparse.Namespace) -> int:
             _p(f"{YELLOW}ใช้ไฟล์ {path} ไม่ได้{RESET}")
     if total:
         speaker = session.store.find_speaker_by_name(args.name)
-        _p(f"\nจำเสียงของ {args.name} แล้วครับ (id={speaker.id if speaker else '?'})")
+        _p(f"\nจำเสียงของ {args.name} แล้ว (id={speaker.id if speaker else '?'})")
+    _close(session)
     return 0 if total else 1
 
 
@@ -353,16 +371,35 @@ def cmd_forget(args: argparse.Namespace) -> int:
     speaker = store.get_speaker(args.speaker_id)
     if speaker is None:
         _p(f"ไม่พบผู้สนทนา id={args.speaker_id}")
+        store.close()
         return 1
-    if not args.yes:
-        answer = input(f"ลบ {speaker.call_name} และความจำทั้งหมด? พิมพ์ 'ใช่' เพื่อยืนยัน: ")
-        if answer.strip() not in {"ใช่", "yes", "y"}:
-            _p("ยกเลิกแล้ว")
-            return 1
-    store.delete_speaker(speaker.id)
-    _p(f"ลบ {speaker.call_name} และความจำทั้งหมดแล้ว")
-    store.close()
-    return 0
+    try:
+        if args.memory_only:
+            if not args.yes:
+                answer = input(
+                    f"ลบความจำทั้งหมดของ {speaker.call_name} (ยังรู้จักตัวเขาอยู่)? "
+                    "พิมพ์ 'ใช่' เพื่อยืนยัน: "
+                )
+                if answer.strip() not in {"ใช่", "yes", "y"}:
+                    _p("ยกเลิกแล้ว")
+                    return 1
+            removed = store.forget_everything(speaker.id)
+            _p(
+                f"ลบความจำของ {speaker.call_name} แล้ว — สิ่งที่จำไว้ {removed['facts']} "
+                f"บทสรุป {removed['summaries']} บทสนทนา {removed['turns']}"
+            )
+            return 0
+
+        if not args.yes:
+            answer = input(f"ลบ {speaker.call_name} และความจำทั้งหมด? พิมพ์ 'ใช่' เพื่อยืนยัน: ")
+            if answer.strip() not in {"ใช่", "yes", "y"}:
+                _p("ยกเลิกแล้ว")
+                return 1
+        store.delete_speaker(speaker.id)
+        _p(f"ลบ {speaker.call_name} และความจำทั้งหมดแล้ว")
+        return 0
+    finally:
+        store.close()
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -407,6 +444,11 @@ def build_parser() -> argparse.ArgumentParser:
     forget = sub.add_parser("forget", help="ลบคนนั้นและความจำทั้งหมด")
     forget.add_argument("speaker_id", type=int)
     forget.add_argument("--yes", action="store_true", help="ไม่ต้องถามยืนยัน")
+    forget.add_argument(
+        "--memory-only",
+        action="store_true",
+        help="ลบเฉพาะความจำ (ข้อเท็จจริง บทสรุป บทสนทนา) แต่ยังรู้จักตัวคนอยู่",
+    )
     forget.set_defaults(func=cmd_forget)
 
     serve = sub.add_parser("serve", help="เปิดเซิร์ฟเวอร์ HTTP")

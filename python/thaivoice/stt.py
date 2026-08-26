@@ -24,7 +24,14 @@ from .thai_text import normalize_transcript, thai_ratio
 
 log = logging.getLogger("thaivoice.stt")
 
-__all__ = ["Transcription", "SpeechToText", "load_stt", "pcm_to_wav", "wav_to_pcm"]
+__all__ = [
+    "Transcription",
+    "SpeechToText",
+    "load_stt",
+    "looks_like_thai",
+    "pcm_to_wav",
+    "wav_to_pcm",
+]
 
 # บอกใบ้ Whisper ว่ากำลังฟังภาษาไทยแบบสนทนา ช่วยลดการถอดเป็นคำทับศัพท์แปลก ๆ
 THAI_PROMPT = "บทสนทนาภาษาไทยแบบเป็นกันเอง มีคำลงท้าย ครับ ค่ะ นะคะ"
