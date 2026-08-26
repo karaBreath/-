@@ -8,7 +8,12 @@ from conftest import FakeAnthropic, FakeEmbedder
 
 from thaivoice.brain import ThaiBrain
 from thaivoice.memory import MemoryStore
-from thaivoice.session import ConversationSession, detect_forget_all, is_affirmative
+from thaivoice.session import (
+    ConversationSession,
+    _address,
+    detect_forget_all,
+    is_affirmative,
+)
 from thaivoice.speaker import SpeakerIdentifier
 
 
@@ -439,3 +444,14 @@ class Testบอทถามชื่อจริงหรือเปล่า:
     def test_ประโยคที่ถามชื่อผู้ใช้ต้องเปิดประตู(self, session, reply):
         session._note_assistant_reply(reply)
         assert session._asked_for_name is True
+
+
+class Testการเรียกชื่อ:
+    @pytest.mark.parametrize("name", ["อาทิตย์", "อารีย์", "อาร์ม", "เดช"])
+    def test_ชื่อที่ขึ้นต้นด้วยอาต้องได้คุณนำหน้า(self, name):
+        """"อา" เคยถูกนับเป็นคำเรียกญาติ ทำให้เรียกชื่อเปล่า ๆ ซึ่งฟังห้วนมาก"""
+        assert _address(name) == f"คุณ{name}"
+
+    @pytest.mark.parametrize("name", ["พี่เดช", "คุณมาลี", "นายสมชาย", "น้องบี"])
+    def test_ชื่อที่มีคำเรียกอยู่แล้วต้องไม่ซ้อน(self, name):
+        assert _address(name) == name

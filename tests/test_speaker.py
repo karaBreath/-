@@ -291,3 +291,89 @@ class Testคนชื่อซ้ำกัน:
             assert กลับมา.speaker.id == second.speaker.id
 
         assert len(store.find_speakers_by_name("สมชาย")) == 2
+
+
+class Testชื่อที่ลงท้ายด้วยนะจริง:
+    """ตัวแก้รอบสามตัด "นะ" ออกเสมอโดยมีบัญชีรายชื่อยกเว้นแค่สามชื่อ
+
+    วัฒนะ พัฒนะ ชัยวัฒนะ เป็นชื่อที่พบบ่อย พอถูกตัดเหลือ "วัฒ" "พัฒ" TTS
+    จะอ่านว่า "วัด" "พัด" แล้วบอทเรียกเขาแบบนั้นไปตลอด บัญชีรายชื่อขยายตามไม่ทัน
+    """
+
+    @pytest.mark.parametrize(
+        "phrase,name",
+        [
+            ("ผมชื่อวัฒนะครับ", "วัฒนะ"),
+            ("ผมชื่อพัฒนะครับ", "พัฒนะ"),
+            ("ผมชื่อชนะครับ", "ชนะ"),
+            ("ผมชื่อธนะครับ", "ธนะ"),
+            ("ผมชื่อมานะครับ", "มานะ"),
+        ],
+    )
+    def test_ไม่ตัดนะออกจากชื่อจริง(self, phrase, name):
+        assert extract_name_claim(phrase) == name
+
+    @pytest.mark.parametrize(
+        "phrase,name",
+        [
+            ("ผมชื่อโอนะครับ", "โอ"),
+            ("หนูชื่อมดนะคะ", "มด"),
+            ("ผมชื่อสมชายนะครับ", "สมชาย"),
+            ("ผมชื่อเบียร์นะครับ", "เบียร์"),
+        ],
+    )
+    def test_ยังตัดนะที่เป็นคำลงท้ายได้(self, phrase, name):
+        assert extract_name_claim(phrase) == name
+
+
+class Testสรรพนามนำหน้าชื่อ:
+    """"ผมเบียร์ครับ" คือคำตอบที่เป็นธรรมชาติที่สุดของคำถาม "เรียกว่าอะไรดีคะ"
+
+    ถ้าไม่ตัดสรรพนามออก ตัวตนของเขาจะชื่อ "ผมเบียร์" ถาวร
+    """
+
+    @pytest.mark.parametrize(
+        "answer,name",
+        [
+            ("ผมเบียร์ครับ", "เบียร์"),
+            ("หนูมิ้นค่ะ", "มิ้น"),
+            ("กระผมสมชายครับ", "สมชาย"),
+            ("ดิฉันมาลีค่ะ", "มาลี"),
+            ("ผมนายสมศักดิ์ครับ", "สมศักดิ์"),
+        ],
+    )
+    def test_ตัดสรรพนามออกจากคำตอบ(self, answer, name):
+        assert extract_name_claim(answer, expecting_name=True) == name
+
+    @pytest.mark.parametrize(
+        "answer", ["ผมหิวครับ", "ผมง่วงครับ", "ผมลืมบอกไปครับ", "หนูเหนื่อยค่ะ"]
+    )
+    def test_สรรพนามต้องไม่บังคำที่ไม่ใช่ชื่อ(self, answer):
+        assert extract_name_claim(answer, expecting_name=True) is None
+
+
+class Testเพศที่ยังไม่รู้:
+    """ของเดิมเก็บ "ครับ" ให้ทุกคนที่ยังไม่ได้ลงท้ายอะไร
+
+    แล้ว prompt ก็บอกโมเดลว่า "คู่สนทนาลงท้ายว่าครับ" ทั้งที่เขาไม่เคยพูดคำนั้น
+    ผู้หญิงจึงถูกยืนยันว่าเป็นผู้ชาย โมเดลก็เลือกคำเรียกผิด
+    """
+
+    def test_ไม่รู้เพศต้องไม่เดาว่าเป็นผู้ชาย(self, store):
+        ระบบ = SpeakerIdentifier(store, None)
+        result = ระบบ.resolve(None, 16000, "ชื่อแนน")
+        assert result.speaker.gender is None
+        assert result.speaker.particle is None
+
+    @pytest.mark.parametrize(
+        "utterance,gender",
+        [
+            ("หนูชื่อฝ้าย", "female"),
+            ("ดิฉันชื่อวรรณ", "female"),
+            ("ผมชื่อเดช", "male"),
+            ("หนูชื่อมาลีค่ะ", "female"),
+        ],
+    )
+    def test_สรรพนามบอกเพศได้พอๆกับคำลงท้าย(self, store, utterance, gender):
+        ระบบ = SpeakerIdentifier(store, None)
+        assert ระบบ.resolve(None, 16000, utterance).speaker.gender == gender

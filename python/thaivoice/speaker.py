@@ -160,7 +160,15 @@ _NOT_A_NAME_ANSWERS = {
 }
 
 # ชื่อจริงที่ลงท้ายด้วย "นะ" — กันไม่ให้ถูกตัดเป็น "มา"
-_NAMES_ENDING_IN_NA = {"มานะ", "ปัญญะ", "วีระนะ"}
+_NAMES_ENDING_IN_NA = {"มานะ", "ปัญญะ", "วีระนะ", "อนงค์นะ"}
+
+# พยัญชนะที่แทบไม่เคยเป็นตัวสะกดของคำที่จบในตัวเอง
+#
+# ถ้าตัด "นะ" ออกแล้วเหลือคำที่ลงท้ายด้วยตัวพวกนี้ แปลว่าตัดกลางคำแน่นอน
+# "วัฒนะ" -> "วัฒ" และ "พัฒนะ" -> "พัฒ" ซึ่งอ่านออกเสียงว่า "วัด" "พัด"
+# แล้วบอทจะเรียกเขาว่า "คุณวัฒ" ไปตลอด บัญชีรายชื่อล้วน ๆ ขยายตามไม่ทัน
+# (วัฒนะ พัฒนะ ชัยวัฒนะ ล้วนเป็นชื่อที่พบบ่อย) จึงใช้กฎการสะกดแทน
+_RARE_FINAL_CONSONANTS = "ฒฑฌฎฏฐฆฬ"
 
 # คำที่ขึ้นต้นคำตอบซึ่งบอกชัดว่าไม่ใช่ชื่อ ใช้เฉพาะตอนตีความคำตอบเปล่า ๆ
 # (ทุกคำยาว >= 3 ตัวอักษร เพื่อไม่ให้ไปกินต้นชื่อจริง)
@@ -169,12 +177,39 @@ _NOT_A_NAME_STARTS = (
     "เมื่อ", "ตอนนี้", "วันนี้", "อาจ", "คงจะ", "น่าจะ", "เพราะ", "ตอบ",
     "บอกไม่", "ไม่อยาก", "ไม่บอก", "เอาไว้", "แล้วแต่",
     "หิว", "ง่วง", "เหนื่อย", "ปวด", "เบื่อ", "ไม่ใช่", "ไม่ได้",
+    "ลืม", "จำไม่", "ยังไม่", "ขอเวลา", "แค่", "เปล่า",
 )
+
+# สรรพนามบุรุษที่หนึ่งที่คนไทยใส่นำหน้าชื่อเวลาตอบคำถาม "ชื่ออะไร"
+#
+# "ผมเบียร์ครับ" คือคำตอบที่เป็นธรรมชาติที่สุดของคำถามนี้ ถ้าไม่ตัดสรรพนามออก
+# ตัวตนของเขาจะชื่อ "ผมเบียร์" ถาวร แล้วบอทเรียกเขาว่า "คุณผมเบียร์"
+# เรียงจากยาวไปสั้น เพื่อให้ "กระผม" ถูกตัดก่อน "ผม"
+_LEADING_PRONOUNS = ("กระผม", "ข้าพเจ้า", "ดิฉัน", "ผม", "ฉัน", "หนู", "เรา")
 
 _STOPWORD_NAMES = {
     "อะไร", "ไหน", "ใคร", "นี้", "นั้น", "เธอ", "คุณ", "เขา", "มัน", "เรา",
     "ชื่อ", "ตัว", "คน", "งาน", "วันนี้",
 }
+
+
+# สรรพนามบุรุษที่หนึ่งบอกเพศของผู้พูดพอ ๆ กับคำลงท้าย
+# "หนูชื่อฝ้าย" ไม่มีคำลงท้ายเลย แต่ "หนู" บอกชัดว่าเป็นผู้หญิง
+# extraction.py สอนโมเดลกฎนี้อยู่แล้ว มีแต่เส้นทางกฎที่ยังไม่รู้
+_PRONOUN_GENDER = (
+    ("กระผม", "male"),
+    ("ผม", "male"),
+    ("ดิฉัน", "female"),
+    ("หนู", "female"),
+)
+
+
+def _gender_from_pronoun(text: str) -> str | None:
+    """เดาเพศจากสรรพนามบุรุษที่หนึ่ง คืน ``None`` เมื่อไม่มีเบาะแส"""
+    for pronoun, gender in _PRONOUN_GENDER:
+        if pronoun in text:
+            return gender
+    return None
 
 
 def _clean_name(raw: str) -> str | None:
@@ -194,7 +229,10 @@ def _clean_name(raw: str) -> str | None:
             # สองตัวอักษรซึ่งพบบ่อยมาก (โอ มด นก ปอ เอ บี เจ กบ) กลายเป็น "โอนะ"
             # "มดนะ" ติดตัวไปตลอด — พลาดบ่อยกว่ากันเยอะ จึงตัด "นะ" ออกเสมอ
             # ยกเว้นชื่อไม่กี่ชื่อที่ลงท้ายด้วย "นะ" จริง ๆ
-            if suffix.startswith("นะ") and (rest + "นะ") in _NAMES_ENDING_IN_NA:
+            if suffix.startswith("นะ") and (
+                (rest + "นะ") in _NAMES_ENDING_IN_NA
+                or (rest and rest[-1] in _RARE_FINAL_CONSONANTS)
+            ):
                 continue
             if len(rest) >= 2:
                 name = rest
@@ -261,7 +299,14 @@ def extract_name_claim(text: str, expecting_name: bool = False) -> str | None:
         stripped = text.strip()
         # คำตอบต้องสั้นและเป็นคำเดียว ไม่งั้นน่าจะเป็นประโยคอื่นที่พูดต่อ
         if len(stripped) <= 24 and len(stripped.split()) <= 2:
-            candidate = _clean_name(stripped.replace(" ", ""))
+            body = stripped.replace(" ", "")
+            for pronoun in _LEADING_PRONOUNS:
+                if body.startswith(pronoun) and len(body) - len(pronoun) >= 2:
+                    # ยอมรับความกำกวม: "หนูดีค่ะ" อาจแปลว่า "ชื่อดี" หรือ "ชื่อหนูดี"
+                    # ก็ได้ แต่ "หนู" เป็นสรรพนามบ่อยกว่าเป็นต้นชื่อมาก
+                    body = body[len(pronoun) :]
+                    break
+            candidate = _clean_name(body)
             # คำตอบสั้น ๆ ส่วนใหญ่ไม่ใช่ชื่อ ("ครับ" "ขอโทษ" "ไม่บอก")
             # _clean_name กรองให้ชั้นหนึ่งแล้ว ตรวจซ้ำหลังตัดคำลงท้ายอีกที
             if candidate and _looks_like_a_name(candidate):
@@ -584,7 +629,11 @@ class SpeakerIdentifier:
             from .thai_text import detect_particle, particle_for_gender
 
             speaker, fork, sure = self._match_by_name(claimed, pcm, sample_rate)
-            gender = detect_particle(transcript)
+            gender = detect_particle(transcript) or _gender_from_pronoun(transcript)
+            # ถ้ายังไม่รู้เพศ ต้องปล่อยว่างไว้ ไม่ใช่เดาเป็นผู้ชาย
+            # ของเดิมเก็บ "ครับ" ให้ทุกคนที่ยังไม่ได้ลงท้ายอะไร แล้ว prompt
+            # ก็บอกโมเดลว่า "คู่สนทนาลงท้ายว่าครับ" ทั้งที่เขาไม่เคยพูดคำนั้น
+            particle = particle_for_gender(gender) if gender else None
             if fork:
                 # ชื่อซ้ำกันแต่เสียงไม่ใช่คนเดิม — "สมชาย" มีได้หลายคน
                 # ถ้ายุบเป็นคนเดียวกัน คนที่สองจะได้อ่านความจำของคนแรก
@@ -592,7 +641,7 @@ class SpeakerIdentifier:
                 speaker = self.store.create_speaker(
                     claimed,
                     gender=gender,
-                    particle=particle_for_gender(gender),
+                    particle=particle,
                     allow_duplicate_name=True,
                 )
                 created = True
@@ -602,7 +651,7 @@ class SpeakerIdentifier:
                 speaker, created = self.store.get_or_create_speaker(
                     claimed,
                     gender=gender,
-                    particle=particle_for_gender(gender),
+                    particle=particle,
                 )
             else:
                 created = False
