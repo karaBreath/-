@@ -484,3 +484,149 @@ describe("VoiceConversation — บัคที่เจอจากการต
     assert.equal(FakeTrack.live, 0);
   });
 });
+
+describe("VoiceConversation — บัคที่เจอจากการตรวจรอบสาม", () => {
+  const client = () => new ThaiVoiceClient({ baseUrl: "http://x", sessionId: "t" });
+
+  async function started(options = {}) {
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      ...options,
+    });
+    await talk.start();
+    return { talk, recognition: FakeSpeechRecognition.instances.at(-1) };
+  }
+
+  test("หยุดแล้วเริ่มใหม่ต้องไม่เหลือ recognizer ผีที่ฟังเสียงบอทเอง", async () => {
+    // abort() ยิง end แบบ asynchronous ตามสเปก ถ้าตัวเก่าไม่เช็คว่าตัวเองยังถูกใช้อยู่
+    // มันจะปลุกตัวเองกลับมา กลายเป็นสอง recognizer แล้ว pauseRecognition หยุดได้
+    // แค่ตัวใหม่ ตัวเก่าจึงถอดเสียงบอทระหว่างบอทพูด แล้วส่งกลับเป็นเทิร์นใหม่
+    const { talk } = await started({ bargeIn: false });
+    const เก่า = FakeSpeechRecognition.instances.at(-1);
+
+    talk.stop();
+    await talk.start(); // ผู้ใช้กด "หยุด" แล้วกด "เริ่มคุย" ใหม่บนตัวเดิม
+    const ใหม่ = FakeSpeechRecognition.instances.at(-1);
+    await sleep(30); // end ของตัวเก่าเพิ่งมาถึงตอนนี้
+
+    assert.notEqual(ใหม่, เก่า);
+    assert.equal(เก่า.running, false, "recognizer ตัวเก่าต้องไม่ปลุกตัวเองกลับมา");
+
+    // ถ้าตัวเก่ายังฟังอยู่ มันจะถอดเสียงบอทระหว่างบอทพูดแล้วส่งเป็นเทิร์นใหม่
+    ใหม่.emitFinal("ถาม");
+    await sleep(30);
+    เก่า.emitFinal("เสียงบอทที่ไมค์ผีได้ยิน");
+    await sleep(30);
+
+    const socket = FakeWebSocket.instances.at(-1);
+    assert.deepEqual(
+      socket.sent.map((m) => m.text),
+      ["ถาม"],
+      "ไมค์ผีต้องไม่ส่งเสียงบอทกลับไปเป็นเทิร์นใหม่",
+    );
+    talk.stop();
+  });
+
+  test("พูดสองประโยคติดกันต้องได้ยินเสียงตอบของประโยคแรก", async () => {
+    // Chrome ส่ง final result สองอันในเหตุการณ์เดียวเป็นเรื่องปกติ
+    // ของเดิมเก็บ "เทิร์นที่รับเสียงได้" ไว้ช่องเดียว พอส่งประโยคที่สอง
+    // เสียงของเทิร์นแรกที่กำลังไหลมาจึงถูกทิ้งทั้งหมด ผู้ใช้เห็นข้อความ
+    // แต่บอทเงียบสนิท
+    const replies = [];
+    const { talk, recognition } = await started({
+      bargeIn: false,
+      onReply: (t) => replies.push(t),
+    });
+
+    recognition.emitFinal("หนึ่ง", "สอง");
+    await sleep(40);
+
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "chunk", text: "ตอบหนึ่ง", audio: "T05F" });
+    socket.emit({ type: "done", text: "ตอบหนึ่ง" });
+    await sleep(80);
+
+    assert.deepEqual(socket.sent.map((m) => m.text), ["หนึ่ง", "สอง"]);
+    assert.ok(
+      FakeAudio.played.some((url) => url.includes("T05F")),
+      `เสียงของเทิร์นแรกต้องถูกเล่น ไม่ใช่ถูกทิ้ง: ${FakeAudio.played}`,
+    );
+    assert.deepEqual(replies, ["ตอบหนึ่ง"]);
+    talk.stop();
+  });
+
+  test("socket เก่าที่ปิดตามมาทีหลังต้องไม่ล้างเทิร์นที่กำลังคุยอยู่", async () => {
+    const replies = [];
+    const errors = [];
+    const { talk, recognition } = await started({
+      bargeIn: false,
+      onReply: (t) => replies.push(t),
+      onError: (e) => errors.push(e.message),
+    });
+
+    recognition.emitFinal("ประโยคแรก");
+    await sleep(30);
+    const เก่า = FakeWebSocket.instances[0];
+    เก่า.emit({ type: "done", text: "ตอบแรก" });
+    await sleep(30);
+
+    // เซิร์ฟเวอร์ปิด socket เพราะไม่มีใครใช้ แล้วผู้ใช้พูดใหม่ทันที
+    เก่า.readyState = 3;
+    recognition.emitFinal("ประโยคที่สอง");
+    await sleep(40);
+    เก่า._fire("close", {}); // close ของตัวเก่าเพิ่งมาถึง
+
+    const ใหม่ = FakeWebSocket.instances.at(-1);
+    ใหม่.emit({ type: "done", text: "ตอบสอง" });
+    await sleep(40);
+
+    assert.deepEqual(errors, [], `ไม่ควรมีข้อความ "การเชื่อมต่อหลุด" ปลอม: ${errors}`);
+    assert.deepEqual(replies, ["ตอบแรก", "ตอบสอง"]);
+    talk.stop();
+  });
+
+  test("ชิ้นเสียงที่ยิงทั้ง error และ end ต้องไม่ทำให้ไมค์เปิดกลางประโยค", async () => {
+    // เครื่องสังเคราะห์เสียงส่วนใหญ่ยิงทั้งสองเหตุการณ์เมื่อชิ้นถูกขัดจังหวะ
+    // ของเดิมลดตัวนับสองครั้งต่อชิ้นเดียว ไปขโมยการนับของชิ้นอื่น
+    const { talk, recognition } = await started({ bargeIn: false, serverTts: false });
+    recognition.emitFinal("ถาม");
+    await sleep(30);
+
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "chunk", text: "ประโยคหนึ่ง" });
+    socket.emit({ type: "chunk", text: "ประโยคสอง" });
+    socket.emit({ type: "done", text: "ประโยคหนึ่งประโยคสอง" });
+    await sleep(20);
+
+    const [หนึ่ง, สอง] = globalThis.speechSynthesis.spoken.slice(-2);
+    หนึ่ง.onerror?.();
+    หนึ่ง.onend?.();
+    await sleep(20);
+
+    assert.equal(talk.currentState, "speaking", "ชิ้นที่สองยังพูดอยู่");
+    assert.equal(recognition.running, false, "ไมโครโฟนต้องยังปิดอยู่");
+
+    สอง.onend?.();
+    await sleep(20);
+    assert.equal(talk.currentState, "listening");
+    talk.stop();
+  });
+
+  test("error ที่ไม่ผูกกับเทิร์นไหนต้องไม่หายเงียบ", async () => {
+    const errors = [];
+    const { talk, recognition } = await started({ onError: (e) => errors.push(e.message) });
+    recognition.emitFinal("ทักทาย");
+    await sleep(30);
+
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "done", text: "สวัสดี" });
+    await sleep(30);
+    socket.emit({ type: "error", text: "เฟรมไม่ถูกต้อง" });
+    await sleep(10);
+
+    assert.deepEqual(errors, ["เฟรมไม่ถูกต้อง"]);
+    talk.stop();
+  });
+});

@@ -146,12 +146,7 @@ export class ThaiVoiceClient {
       body: JSON.stringify({ text, voice: voice ?? null }),
     });
     if (!response.ok) {
-      let detail: unknown;
-      try {
-        detail = await response.json();
-      } catch {
-        detail = await response.text().catch(() => "");
-      }
+      const detail = await readErrorBody(response);
       throw new ThaiVoiceError(describeError(detail, response.status), response.status, detail);
     }
     return response.blob();
@@ -348,15 +343,27 @@ export class ThaiVoiceClient {
 
   private async unwrap<T>(response: Response): Promise<T> {
     if (!response.ok) {
-      let detail: unknown;
-      try {
-        detail = await response.json();
-      } catch {
-        detail = await response.text().catch(() => "");
-      }
+      const detail = await readErrorBody(response);
       throw new ThaiVoiceError(describeError(detail, response.status), response.status, detail);
     }
     return (await response.json()) as T;
+  }
+}
+
+/**
+ * อ่านเนื้อความของคำตอบที่ผิดพลาด ทั้งแบบ JSON และแบบข้อความล้วน
+ *
+ * ต้อง clone ก่อน เพราะ ``response.json()`` กินสตรีมไปแล้วแม้จะโยน error
+ * การเรียก ``response.text()`` ต่อจึงล้มเหมือนกัน แล้วรายละเอียดกลายเป็นค่าว่าง
+ * หน้า HTML ของ 502 จึงรายงานได้แค่ "คำขอล้มเหลว (502)" โดยไม่บอกอะไรเลย
+ */
+async function readErrorBody(response: Response): Promise<unknown> {
+  const copy = typeof response.clone === "function" ? response.clone() : null;
+  try {
+    return await response.json();
+  } catch {
+    if (!copy) return "";
+    return copy.text().catch(() => "");
   }
 }
 

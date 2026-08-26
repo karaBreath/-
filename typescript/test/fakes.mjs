@@ -148,7 +148,21 @@ export class FakeWebSocket {
     this._fire("message", { data: JSON.stringify(event) });
   }
 
+  /**
+   * ปิดการเชื่อมต่อ — เหตุการณ์ close ต้องมาแบบ asynchronous
+   *
+   * เบราว์เซอร์จริงไม่เคยยิง close แบบซิงโครนัสใน close() ของเดิมยิงทันที
+   * ซึ่งใจดีกว่าความจริง แล้วบัคที่เกิดจาก socket เก่าปิดตามมาทีหลังจึงซ่อนอยู่
+   */
   close() {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    queueMicrotask(() => this._fire("close", {}));
+  }
+
+  /** ปิดแบบซิงโครนัส (ใช้เฉพาะเทสต์ที่ต้องการลำดับแน่นอน) */
+  closeNow() {
+    if (this.readyState === 3) return;
     this.readyState = 3;
     this._fire("close", {});
   }
@@ -191,9 +205,15 @@ export class FakeSpeechRecognition {
     }
   }
 
+  /**
+   * ยกเลิกทันที — แต่เหตุการณ์ end มาทีหลังแบบ asynchronous ตามสเปก
+   *
+   * ของเดิมไม่ยิง end เลย ซึ่งใจดีกว่าเบราว์เซอร์จริง บัค recognizer ผีจึงซ่อนอยู่
+   */
   abort() {
     this.aborted += 1;
     this.running = false;
+    queueMicrotask(() => this.onend?.());
   }
 
   /** ยิงผลลัพธ์สุดท้ายหลายรายการในเหตุการณ์เดียว (เกิดขึ้นจริงกับ Chrome) */
@@ -205,6 +225,36 @@ export class FakeSpeechRecognition {
     }));
     results.length = texts.length;
     this.onresult?.({ resultIndex: 0, results: { ...results, length: texts.length } });
+  }
+}
+
+/**
+ * เครื่องสังเคราะห์เสียงปลอม — ควบคุมได้ว่าชิ้นไหนจบเมื่อไร
+ *
+ * ของจริงยิงทั้ง error และ end เมื่อชิ้นถูกขัดจังหวะ ซึ่งเป็นที่มาของบัคการนับ
+ */
+export class FakeSpeechSynthesis {
+  static install() {
+    const spoken = [];
+    globalThis.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text;
+        this.onend = null;
+        this.onerror = null;
+      }
+    };
+    globalThis.speechSynthesis = {
+      spoken,
+      cancelled: 0,
+      getVoices: () => [],
+      addEventListener() {},
+      speak(utterance) {
+        spoken.push(utterance);
+      },
+      cancel() {
+        this.cancelled += 1;
+      },
+    };
   }
 }
 
@@ -249,7 +299,7 @@ export function installFakes() {
       queueMicrotask(() => this.onloadend?.());
     }
   };
-  globalThis.speechSynthesis = undefined;
+  FakeSpeechSynthesis.install();
   return { contexts };
 }
 

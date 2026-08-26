@@ -147,8 +147,13 @@ export class PcmRecorder {
   /** ขอสิทธิ์ไมโครโฟนและเริ่มอัด — เรียกซ้ำได้ และเริ่มใหม่ได้หลัง stop() */
   async start(): Promise<void> {
     if (this.recording) return;
-    this.disposed = false;
+    // ต้องเช็ค starting *ก่อน* ล้าง disposed
+    //
+    // ของเดิมล้างก่อน ทำให้ start() ที่เรียกระหว่าง stop() ยังทำงานค้างอยู่
+    // ไปปลุก getUserMedia ที่กำลังจะถูกทิ้งกลับมา แล้ว stop() ก็รื้อทุกอย่าง
+    // ทิ้งตามหลัง ผู้เรียกจึงได้ recorder ที่บอกว่าสำเร็จแต่ไม่ได้อัดอะไรเลย
     if (this.starting) return this.starting;
+    this.disposed = false;
 
     this.starting = (async () => {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -257,32 +262,59 @@ export class PcmRecorder {
 export class AudioQueue {
   private queue: { url: string; turn: number }[] = [];
   private current: HTMLAudioElement | null = null;
+  private currentTurn = -1;
   private playing = false;
-  private acceptingTurn = -1;
+  /**
+   * เทิร์นที่ยังรับเสียงอยู่ — ต้องเป็น *เซ็ต* ไม่ใช่ตัวเดียว
+   *
+   * ผู้ใช้พูดสองประโยคติดกันได้ง่ายมาก (Chrome ส่ง final result สองอันในเหตุการณ์
+   * เดียวเป็นเรื่องปกติ) เซิร์ฟเวอร์ตอบทีละเทิร์นตามลำดับ ของเดิมเก็บเทิร์นที่
+   * รับได้ไว้ช่องเดียว พอส่งประโยคที่สอง ช่องนั้นเลื่อนไปเทิร์น 2 ทันที
+   * เสียงของเทิร์น 1 ที่กำลังไหลมาจึงถูกทิ้งทั้งหมด — ผู้ใช้เห็นข้อความตอบ
+   * แต่บอทเงียบสนิท
+   */
+  private accepted = new Set<number>();
   /** เพิ่มขึ้นทุกครั้งที่ถูกสั่งหยุด ใช้ให้ลูปเดิมที่ค้างอยู่รู้ว่าต้องเลิก */
   private generation = 0;
 
   constructor(private readonly onIdle?: () => void) {}
 
-  /** เริ่มเทิร์นใหม่ — เสียงของเทิร์นก่อนหน้าที่ยังไหลมาจะถูกทิ้ง */
+  /** เริ่มรับเสียงของเทิร์นนี้ */
   accept(turn: number): void {
-    this.acceptingTurn = turn;
+    this.accepted.add(turn);
   }
 
   /** เพิ่มเสียง base64 เข้าคิวของเทิร์นนั้น */
   push(turn: number, base64: string, mime = "audio/mpeg"): void {
-    if (turn !== this.acceptingTurn) return;
+    if (!this.accepted.has(turn)) return;
     this.queue.push({ url: `data:${mime};base64,${base64}`, turn });
     void this.drain();
   }
 
-  /** หยุดทันที ล้างคิว และไม่รับเสียงของเทิร์นปัจจุบันอีก */
+  /** เลิกรับและทิ้งเสียงของเทิร์นเดียว (ใช้ตอนผู้ใช้พูดแทรกเทิร์นนั้น) */
+  discard(turn: number): void {
+    this.accepted.delete(turn);
+    this.queue = this.queue.filter((item) => item.turn !== turn);
+    if (this.currentTurn === turn) {
+      const audio = this.current;
+      this.current = null;
+      audio?.pause();
+    }
+  }
+
+  /** ลืมเทิร์นทั้งหมดที่จบไปแล้ว — กันเซ็ตโตไม่หยุดในบทสนทนายาว ๆ */
+  reset(): void {
+    if (!this.busy) this.accepted.clear();
+  }
+
+  /** หยุดทันที ล้างคิว และไม่รับเสียงของเทิร์นไหนอีก */
   stop(): void {
     this.generation += 1;
-    this.acceptingTurn = -1;
+    this.accepted.clear();
     this.queue = [];
     const audio = this.current;
     this.current = null;
+    this.currentTurn = -1;
     audio?.pause();
   }
 
@@ -296,8 +328,11 @@ export class AudioQueue {
     try {
       while (this.queue.length > 0) {
         const item = this.queue.shift();
-        if (!item || item.turn !== this.acceptingTurn) continue;
+        if (!item) continue;
+        // ไม่กรองตามเซ็ตตรงนี้ — ของที่เข้าคิวมาแล้วคือของที่รับไว้แล้ว
+        // ส่วนของที่ต้องทิ้งถูกลบออกจากคิวไปตั้งแต่ discard/stop
         const generation = this.generation;
+        this.currentTurn = item.turn;
         await this.playOne(item.url, generation);
         if (generation !== this.generation) break; // ถูกขัดจังหวะระหว่างเล่น
       }
@@ -336,7 +371,9 @@ export class AudioQueue {
 export class ThaiSpeechSynthesis {
   private voice: SpeechSynthesisVoice | null = null;
   private pending = 0;
-  private acceptingTurn = -1;
+  private accepted = new Set<number>();
+  /** เพิ่มขึ้นทุกครั้งที่ถูกสั่งหยุด ใช้ให้เหตุการณ์ของชิ้นเก่าที่ยังไหลมารู้ว่าต้องเลิก */
+  private generation = 0;
 
   constructor(
     private readonly onIdle?: () => void,
@@ -357,7 +394,15 @@ export class ThaiSpeechSynthesis {
   }
 
   accept(turn: number): void {
-    this.acceptingTurn = turn;
+    this.accepted.add(turn);
+  }
+
+  discard(turn: number): void {
+    this.accepted.delete(turn);
+  }
+
+  reset(): void {
+    if (!this.busy) this.accepted.clear();
   }
 
   private pickVoice(): void {
@@ -366,14 +411,24 @@ export class ThaiSpeechSynthesis {
   }
 
   speak(turn: number, text: string): void {
-    if (!this.available || !text.trim() || turn !== this.acceptingTurn) return;
+    if (!this.available || !text.trim() || !this.accepted.has(turn)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "th-TH";
     utterance.rate = this.rate;
     utterance.pitch = this.pitch;
     if (this.voice) utterance.voice = this.voice;
     this.pending += 1;
+    const generation = this.generation;
+    // ชิ้นที่ถูกขัดจังหวะยิงทั้ง error และ end เครื่องสังเคราะห์เสียงส่วนใหญ่
+    // ทำแบบนั้น ของเดิมไม่มีตัวกัน ตัวนับจึงลดสองครั้งต่อชิ้นเดียว ไปขโมย
+    // การนับของชิ้นอื่น busy กลายเป็น false ทั้งที่บอทยังพูดอยู่ ระบบจึงจบ
+    // เทิร์นและเปิดไมโครโฟนกลับมากลางประโยค แล้วได้ยินเสียงบอทเอง
+    let settled = false;
     const finish = () => {
+      if (settled) return;
+      settled = true;
+      // ถ้าถูก stop() ไปแล้ว ตัวนับถูกล้างไปพร้อมกัน อย่าลดซ้ำ
+      if (generation !== this.generation) return;
       this.pending = Math.max(0, this.pending - 1);
       if (this.pending === 0) this.onIdle?.();
     };
@@ -383,7 +438,8 @@ export class ThaiSpeechSynthesis {
   }
 
   stop(): void {
-    this.acceptingTurn = -1;
+    this.generation += 1;
+    this.accepted.clear();
     this.pending = 0;
     globalThis.speechSynthesis?.cancel();
   }
@@ -558,6 +614,14 @@ export class VoiceConversation {
     };
 
     recognition.onend = () => {
+      // ต้องเช็คว่าตัวเองยังเป็นตัวที่ใช้อยู่จริงไหม
+      //
+      // ตามสเปก abort() ยิง end แบบ asynchronous ถ้าผู้ใช้กดหยุดแล้วกดเริ่มใหม่
+      // ก่อนเหตุการณ์นั้นจะมาถึง ตัวเก่าจะปลุกตัวเองกลับมาทำงาน กลายเป็นสอง
+      // recognizer พร้อมกัน แล้ว pauseRecognition หยุดได้แค่ตัวใหม่ ตัวเก่าจึง
+      // ฟังต่อระหว่างบอทพูด ถอดเสียงบอทเอง แล้วส่งกลับไปเป็นเทิร์นใหม่ —
+      // บทสนทนาวนไม่จบที่แก้ไปแล้วรอบก่อน
+      if (this.recognition !== recognition) return;
       if (this.running && !this.recognitionPaused) {
         try {
           recognition.start();
@@ -596,10 +660,19 @@ export class VoiceConversation {
     if (!this.audio.busy && !this.synth.busy && this.pending.length === 0) return;
     this.audio.stop();
     this.synth.stop();
-    const interrupted = this.pending[0];
-    if (interrupted && !interrupted.abandoned) {
+    // ของเดิมยกเลิก pending[0] เสมอ ซึ่งอาจถูกยกเลิกไปแล้ว ส่วนเทิร์นที่กำลัง
+    // ให้ผลอยู่จริงคือตัวถัดไป จึงรอดไปโดยไม่ถูกขัด
+    const interrupted = this.pending.find((turn) => !turn.abandoned);
+    if (interrupted) {
       interrupted.abandoned = true;
       if (interrupted.reply) this.options.onReply?.(interrupted.reply);
+    }
+    // stop() ล้างเทิร์นที่รับได้ทั้งหมด ต้องรับเทิร์นที่ยังไม่ถูกยกเลิกกลับเข้ามา
+    // ไม่งั้นประโยคที่ผู้ใช้พูดต่อจากการพูดแทรกจะเงียบสนิทตลอดไป
+    for (const turn of this.pending) {
+      if (turn.abandoned) continue;
+      this.audio.accept(turn.id);
+      this.synth.accept(turn.id);
     }
     this.setState("listening");
   }
@@ -613,8 +686,15 @@ export class VoiceConversation {
     this.running = false;
     this.recognitionPaused = false;
     this.pending = [];
-    this.recognition?.abort();
+    const recognition = this.recognition;
     this.recognition = null;
+    if (recognition) {
+      // ปลดตัวจัดการก่อน abort() ไม่งั้น end ที่ยิงตามมาทีหลังยังวิ่งเข้าโค้ดเดิม
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      recognition.abort();
+    }
     const recorder = this.recorder;
     this.recorder = null;
     await recorder?.stop();
@@ -702,8 +782,19 @@ export class VoiceConversation {
       stream.send(text, { audio: audioBase64, speak: this.options.serverTts ?? true });
     } catch (error) {
       this.options.onError?.(error as Error);
-      this.dropPending();
+      // ทิ้งเฉพาะเทิร์นนี้ ของเดิมล้าง pending ทั้งกอง เทิร์นก่อนหน้าที่กำลัง
+      // คุยอยู่ดี ๆ จึงถูกลบไปด้วยเพราะประโยคใหม่ส่งไม่สำเร็จ
+      this.dropTurn(turn);
     }
+  }
+
+  /** ทิ้งเทิร์นเดียวที่ส่งไม่สำเร็จ */
+  private dropTurn(turn: number): void {
+    const index = this.pending.findIndex((item) => item.id === turn);
+    if (index >= 0) this.pending.splice(index, 1);
+    this.audio.discard(turn);
+    this.synth.discard(turn);
+    this.maybeFinish();
   }
 
   /**
@@ -715,6 +806,14 @@ export class VoiceConversation {
    */
   private ensureStream(): Promise<StreamConnection> {
     if (this.stream?.open) return Promise.resolve(this.stream);
+    // socket ที่กำลังปิดอยู่ (open เป็น false แต่เหตุการณ์ close ยังไม่มาถึง)
+    // ต้องไม่ถูกแจกต่อ ของเดิมไม่เคยล้าง streamReady หลังต่อสำเร็จ จึงคืน
+    // promise เดิมที่ resolve แล้ว ผู้เรียกส่งข้อความไม่ได้ ได้ error กำกวม
+    // แล้ว dropPending ก็ล้างเทิร์นที่ยังคุยอยู่ทิ้งไปด้วย
+    if (this.stream && !this.stream.open) {
+      this.stream = null;
+      this.streamReady = null;
+    }
     if (this.streamReady) return this.streamReady;
 
     this.streamReady = (async () => {
@@ -725,10 +824,14 @@ export class VoiceConversation {
           // ต้องเช็คว่าเป็นตัวที่ใช้อยู่จริงไหม การเชื่อมต่อที่ล้มจะยิง error
           // ก่อนแล้วค่อยยิง close ถ้าล้างสถานะตอน close โดยไม่เช็ค มันจะไปล้าง
           // การเชื่อมต่อตัวใหม่ที่เพิ่งเปิดแทน กลายเป็นสอง socket พร้อมกัน
-          if (this.stream === connection) {
-            this.stream = null;
-            this.streamReady = null;
+          if (this.stream !== connection) {
+            // socket เก่าที่ปิดตามมาทีหลัง — ห้ามแตะสถานะของตัวที่ใช้อยู่
+            // ไม่งั้นเทิร์นที่กำลังคุยอยู่จะถูกล้างทิ้งพร้อมข้อความ "การเชื่อมต่อหลุด"
+            // ปลอม ๆ แล้วส่วนท้ายของคำตอบนั้นจะไปโผล่เป็นคำตอบของประโยคถัดไป
+            return;
           }
+          this.stream = null;
+          this.streamReady = null;
           // การเชื่อมต่อหลุดกลางเทิร์นต้องบอกผู้ใช้และปลดสถานะ ไม่งั้น UI จะค้าง
           // ที่ "กำลังคิด" ตลอดกาล และไมโครโฟนที่ถูกพักไว้จะไม่ถูกเปิดกลับมาเลย
           this.dropPending("การเชื่อมต่อหลุด ลองพูดอีกครั้ง");
@@ -751,7 +854,15 @@ export class VoiceConversation {
   private handleEvent(event: StreamEvent): void {
     // เหตุการณ์เป็นของเทิร์นที่เก่าที่สุดที่ยังไม่จบ ไม่ใช่เทิร์นล่าสุดที่ส่งไป
     const turn = this.pending[0];
-    if (!turn) return; // เหตุการณ์หลงมาหลังทุกเทิร์นจบแล้ว
+    if (!turn) {
+      // เซิร์ฟเวอร์ส่ง error ที่ไม่ผูกกับเทิร์นไหนได้ (เฟรมพัง เฟรมไบนารี)
+      // ของเดิมกลืนทิ้งหมด ผู้ใช้จึงไม่รู้เลยว่าเกิดอะไรขึ้น
+      if (event.type === "error") {
+        const message = typeof event.text === "string" ? event.text : "";
+        this.options.onError?.(new Error(message || "เกิดข้อผิดพลาด"));
+      }
+      return;
+    }
 
     const text = typeof event.text === "string" ? event.text : "";
 
@@ -806,6 +917,9 @@ export class VoiceConversation {
   private maybeFinish(): void {
     if (this.pending.length > 0) return;
     if (this.audio.busy || this.synth.busy) return;
+    // ทุกอย่างว่างแล้ว ลืมหมายเลขเทิร์นเก่าได้ กันเซ็ตโตไม่หยุดในบทสนทนายาว ๆ
+    this.audio.reset();
+    this.synth.reset();
     this.finishTurn();
   }
 
