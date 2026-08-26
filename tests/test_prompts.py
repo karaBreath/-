@@ -86,3 +86,33 @@ class TestHumanDelta:
 
     def test_เวลาติดลบไม่พัง(self):
         assert human_delta_th(-100) == "เมื่อสักครู่"
+
+
+class Testถ้อยคำในบล็อกความจำ:
+    def test_ต้องไม่มีคำว่าเมื่อซ้อนกัน(self, store):
+        """human_delta_th คืนค่าที่ขึ้นต้นด้วย "เมื่อ" อยู่แล้วในบางกรณี
+
+        การเติมซ้ำได้ "เริ่มรู้จักกันเมื่อ เมื่อสักครู่" ซึ่งอ่านออกเสียงแล้วสะดุด
+        และเป็นตัวอย่างภาษาที่ไม่ดีให้โมเดลเลียนแบบ
+        """
+        speaker = store.create_speaker("เดช")
+        store.record_turn(speaker.id, "s", "user", "สวัสดี")
+
+        block = build_memory_block(speaker, [], None, store.stats(speaker.id))
+
+        assert "เมื่อ เมื่อ" not in block
+        assert "เริ่มรู้จักกันเมื่อสักครู่" in block
+
+    def test_ช่วงเวลาที่ไม่มีเมื่อนำหน้าต้องได้เมื่อ(self, store):
+        import time
+
+        speaker = store.create_speaker("เดช")
+        store.record_turn(speaker.id, "s", "user", "สวัสดี")
+        store._conn.execute(
+            "UPDATE turns SET created_at = ?", (time.time() - 3 * 3600,)
+        )
+        store._conn.commit()
+
+        block = build_memory_block(speaker, [], None, store.stats(speaker.id))
+
+        assert "เริ่มรู้จักกันเมื่อ 3 ชั่วโมงก่อน" in block

@@ -751,3 +751,38 @@ class Testการอ่านตัวเลขที่เคยพลาด:
     )
     def test_ของที่เคยถูกต้องต้องยังถูกต้อง(self, text, expected):
         assert expand_numbers_for_speech(text) == expected
+
+
+class Testตัวย่อและสัญลักษณ์:
+    def test_ตัวย่อไทยต้องไม่ถูกตัดเป็นคนละประโยค(self):
+        """"ผศ. ดร. สมชาย" ถูกตัดหลัง "ดร." ทำให้ TTS หยุดกลางชื่อคน"""
+        chunker = SpeechChunker(min_chars=8)
+        out = []
+        for ch in "ผศ. ดร. สมชาย เป็นอาจารย์":
+            out += list(chunker.feed(ch))
+        out += list(chunker.flush())
+        assert out[0].startswith("ผศ. ดร. สมชาย")
+
+    def test_จุดจบประโยคจริงยังตัดได้(self):
+        chunker = SpeechChunker(min_chars=8)
+        out = []
+        for ch in "อากาศดี. ไปเที่ยวกัน":
+            out += list(chunker.feed(ch))
+        out += list(chunker.flush())
+        assert out == ["อากาศดี.", "ไปเที่ยวกัน"]
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # ภาษาไทยพูดหน่วยเงินหลังจำนวนเสมอ
+            ("ราคา ฿500", "ราคา ห้าร้อย บาท"),
+            ("ราคา $20", "ราคา ยี่สิบ ดอลลาร์"),
+            ("คิดเป็น 3×4=12", "คิดเป็น สาม คูณ สี่ เท่ากับ สิบสอง"),
+            ("อุณหภูมิ 25±2 องศา", "อุณหภูมิ ยี่สิบห้า บวกลบ สอง องศา"),
+            # ตัวย่อเดือนถูกอ่านทีละพยางค์ ฟังไม่ออกว่าเดือนอะไร
+            ("ก.ค. นี้", "กรกฎาคม นี้"),
+            ("วันที่ 5 มี.ค. 2568", "วันที่ ห้า มีนาคม สองพันห้าร้อยหกสิบแปด"),
+        ],
+    )
+    def test_สัญลักษณ์ที่TTSอ่านไม่ออกต้องถูกแปลง(self, text, expected):
+        assert clean_for_speech(text) == expected

@@ -157,6 +157,16 @@ def human_delta_th(seconds: float) -> str:
     return f"{int(months / 12)} ปีก่อน"
 
 
+def _when(delta: str) -> str:
+    """เติม "เมื่อ" นำหน้าเฉพาะเมื่อยังไม่มี
+
+    ``human_delta_th`` คืนค่าที่ขึ้นต้นด้วย "เมื่อ" อยู่แล้วในบางกรณี
+    ("เมื่อสักครู่" "เมื่อวาน") การเติมซ้ำได้ "เริ่มรู้จักกันเมื่อ เมื่อสักครู่"
+    ซึ่งอ่านออกเสียงแล้วสะดุด และเป็นตัวอย่างภาษาที่ไม่ดีให้โมเดลเลียนแบบ
+    """
+    return delta if delta.startswith("เมื่อ") else f"เมื่อ {delta}"
+
+
 def build_memory_block(
     speaker: Speaker,
     facts: Sequence[Fact],
@@ -188,12 +198,12 @@ def build_memory_block(
         )
 
     if stats and stats.turns:
-        known_for = human_delta_th(now - (stats.first_seen or now))
-        last_seen = human_delta_th(now - (stats.last_seen or now))
+        known_for = _when(human_delta_th(now - (stats.first_seen or now)))
+        last_seen = _when(human_delta_th(now - (stats.last_seen or now)))
         # นับเป็น "ข้อความ" ไม่ใช่ "ครั้ง" เพราะ stats.turns นับทั้งฝั่งผู้ใช้และฝั่งบอท
         lines.append(
-            f"คุยกันมาแล้ว {stats.turns} ข้อความ เริ่มรู้จักกันเมื่อ {known_for} "
-            f"คุยกันครั้งล่าสุดเมื่อ {last_seen}"
+            f"คุยกันมาแล้ว {stats.turns} ข้อความ เริ่มรู้จักกัน{known_for} "
+            f"คุยกันครั้งล่าสุด{last_seen}"
         )
     else:
         lines.append("นี่เป็นการคุยกันครั้งแรก")
