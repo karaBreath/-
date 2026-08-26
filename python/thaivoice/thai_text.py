@@ -28,6 +28,7 @@ __all__ = [
     "read_digits",
     "split_sentences",
     "thai_number_to_words",
+    "thai_segmenter_engine",
     "thai_ratio",
     "normalize_transcript",
 ]
@@ -211,50 +212,98 @@ _PARTICLE_BREAK = re.compile(
 )
 
 
-def _pythainlp_sentences(text: str) -> list[str] | None:
+# ตัวตัดประโยคของ pythainlp เรียงตามความแม่นยำ
+#
+# ระวัง: engine เริ่มต้นของ pythainlp คือ "crfcut" ซึ่งต้องติดตั้ง ``python-crfsuite``
+# เพิ่มต่างหาก ไม่ได้ติดมากับ ``pip install pythainlp`` ถ้าไม่เช็คตรงนี้ ระบบจะเงียบ ๆ
+# ถอยไปใช้กฎสำรองทั้งที่ผู้ใช้ติดตั้ง pythainlp ไปแล้ว
+_SENT_ENGINES = ("crfcut", "thaisum", "whitespace+newline")
+
+_sent_engine: str | None = None
+_sent_engine_probed = False
+
+
+def thai_segmenter_engine(force_probe: bool = False) -> str | None:
+    """ชื่อ engine ตัดประโยคของ pythainlp ที่ใช้ได้จริง หรือ ``None`` ถ้าใช้ไม่ได้เลย
+
+    ผลถูกแคชไว้ เพราะการทดลองเรียก engine ที่ขาด dependency จะโยน exception
+    ทุกครั้งที่เรียก ซึ่งแพงเกินไปสำหรับงานที่ทำทุกเทิร์นของบทสนทนา
+    """
+    global _sent_engine, _sent_engine_probed
+    if _sent_engine_probed and not force_probe:
+        return _sent_engine
+
+    _sent_engine_probed = True
+    _sent_engine = None
     try:
         from pythainlp.tokenize import sent_tokenize  # type: ignore
     except Exception:
         return None
+
+    probe = "ทดสอบระบบตัดประโยคภาษาไทยครับ วันนี้อากาศดีมากเลยนะครับ"
+    for engine in _SENT_ENGINES:
+        try:
+            if sent_tokenize(probe, engine=engine):
+                _sent_engine = engine
+                break
+        except Exception:
+            continue
+    return _sent_engine
+
+
+def _pythainlp_sentences(text: str) -> list[str] | None:
+    engine = thai_segmenter_engine()
+    if engine is None:
+        return None
     try:
-        parts = [p.strip() for p in sent_tokenize(text, engine="crfcut")]
+        from pythainlp.tokenize import sent_tokenize  # type: ignore
+
+        parts = [p.strip() for p in sent_tokenize(text, engine=engine)]
         return [p for p in parts if p] or None
     except Exception:
         return None
 
 
+def _rule_based_split(line: str) -> list[str]:
+    """ตัดหนึ่งบรรทัดด้วยกฎ: เครื่องหมายจบประโยค และคำลงท้ายสุภาพ"""
+    parts: list[str] = []
+    cursor = 0
+    marks = sorted(
+        {m.end() for m in _SENT_END.finditer(line)}
+        | {m.end() for m in _PARTICLE_BREAK.finditer(line)}
+    )
+    for end in marks:
+        chunk = line[cursor:end].strip()
+        if chunk:
+            parts.append(chunk)
+        cursor = end
+    tail = line[cursor:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def split_sentences(text: str, min_chars: int = 12) -> list[str]:
     """ตัดข้อความไทยเป็นประโยคสำหรับส่งให้ TTS ทีละท่อน
 
-    ใช้ pythainlp ถ้ามี ไม่งั้นถอยไปใช้กฎ: ขึ้นบรรทัดใหม่ / เครื่องหมายจบประโยค /
-    คำลงท้ายสุภาพ เป็นจุดตัด
+    ตัดที่ขึ้นบรรทัดใหม่ก่อนเสมอ แล้วค่อยตัดในแต่ละบรรทัดด้วย pythainlp (ถ้าใช้ได้)
+    ไม่งั้นถอยไปใช้กฎ: เครื่องหมายจบประโยค และคำลงท้ายสุภาพ
+
+    เหตุที่ต้องตัดบรรทัดเองก่อน: ตัวตัดประโยคของ pythainlp (crfcut) ไม่ถือว่า
+    ขึ้นบรรทัดใหม่เป็นจุดจบประโยค จะคืนข้อความที่มี ``\n`` ติดมาทั้งก้อน
+    ซึ่ง TTS จะอ่านรวดเดียวไม่เว้นจังหวะ ทั้งที่ขึ้นบรรทัดใหม่คือจุดตัดที่
+    เชื่อถือได้ที่สุดของภาษาไทย
     """
     text = text.strip()
     if not text:
         return []
-
-    via_lib = _pythainlp_sentences(text)
-    if via_lib:
-        return _merge_short(via_lib, min_chars)
 
     parts: list[str] = []
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
-        cursor = 0
-        marks = sorted(
-            {m.end() for m in _SENT_END.finditer(line)}
-            | {m.end() for m in _PARTICLE_BREAK.finditer(line)}
-        )
-        for end in marks:
-            chunk = line[cursor:end].strip()
-            if chunk:
-                parts.append(chunk)
-            cursor = end
-        tail = line[cursor:].strip()
-        if tail:
-            parts.append(tail)
+        parts.extend(_pythainlp_sentences(line) or _rule_based_split(line))
     return _merge_short(parts, min_chars)
 
 

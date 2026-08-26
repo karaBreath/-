@@ -1,0 +1,81 @@
+name: ทดสอบ
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} · ${{ matrix.extras }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+        # รันทั้งแบบมีและไม่มี pythainlp เพราะเส้นทางตัดประโยคต่างกันคนละทาง
+        # และเคยมีบัคที่โผล่เฉพาะตอนติดตั้ง pythainlp แล้วเท่านั้น
+        extras: ["server,dev", "server,thai,dev"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: ติดตั้ง
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[${{ matrix.extras }}]"
+      - name: ตรวจว่า import ได้ครบทุกโมดูล
+        run: |
+          python -c "
+          import importlib
+          for name in ['config','thai_text','memory','speaker','prompts','brain',
+                       'extraction','stt','tts','audio','session','cli','server']:
+              importlib.import_module(f'thaivoice.{name}')
+          print('import ครบทุกโมดูล')
+          "
+      - name: ตัวตัดประโยคที่ใช้ได้จริง
+        run: |
+          python -c "
+          from thaivoice.thai_text import thai_segmenter_engine
+          print('engine:', thai_segmenter_engine(force_probe=True))
+          "
+      - name: pytest
+        run: pytest -q
+      - name: doctest
+        run: |
+          python -m pytest --doctest-modules python/thaivoice/thai_text.py \
+                                             python/thaivoice/prompts.py \
+                                             python/thaivoice/speaker.py \
+                                             python/thaivoice/session.py -q
+      - name: CLI ทำงานได้โดยไม่ต้องมีคีย์
+        run: |
+          thaivoice --help > /dev/null
+          thaivoice doctor
+          thaivoice speakers
+
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci
+      - name: ตรวจชนิดข้อมูล
+        run: npm run typecheck
+      - name: build
+        run: npm run build
+      - name: ต้องได้ไฟล์ครบ
+        run: |
+          test -f dist/index.js
+          test -f dist/index.d.ts
+          test -f web/js/client.js
+          test -f web/js/browserVoice.js

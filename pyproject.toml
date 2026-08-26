@@ -25,7 +25,9 @@ speaker = ["resemblyzer>=0.1.4"]
 # HTTP API
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"]
 # ตัดคำ/ตัดประโยคภาษาไทยให้แม่นขึ้น
-thai = ["pythainlp>=5.0"]
+# python-crfsuite จำเป็นสำหรับ engine "crfcut" ซึ่งเป็นตัวตัดประโยคที่แม่นที่สุด
+# และเป็นค่าเริ่มต้นของ pythainlp แต่ไม่ได้ติดมาด้วย
+thai = ["pythainlp>=5.0", "python-crfsuite>=0.9.7"]
 dev = ["pytest>=8.0"]
 all = [
     "thaivoice[audio,stt,tts,speaker,server,thai,dev]",

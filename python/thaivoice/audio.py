@@ -175,32 +175,65 @@ class AudioPlayer:
         return self._player is not None
 
     def play(self, audio: bytes, suffix: str = ".mp3", block: bool = True) -> bool:
-        """เล่นเสียง คืน ``True`` ถ้าเล่นจนจบ ``False`` ถ้าถูกหยุดกลางคัน"""
+        """เล่นเสียง
+
+        ``block=True``  รอจนเล่นจบ คืน ``True`` ถ้าเล่นครบ ``False`` ถ้าถูกหยุดกลางคัน
+        ``block=False`` สั่งเล่นแล้วคืนทันที คืน ``True`` ถ้าเริ่มเล่นได้
+
+        ทั้งสองแบบลบไฟล์เสียงชั่วคราวให้เสมอ — โหมดไม่บล็อกใช้เธรดเก็บกวาดคอยรอ
+        ให้กระบวนการเล่นจบก่อนแล้วค่อยลบ ถ้าลบทันทีบางโปรแกรมจะอ่านไฟล์ไม่ทัน
+        """
         if not audio or self._player is None:
             return False
         binary, args = self._player
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(audio)
             path = Path(tmp.name)
+
         try:
-            with self._lock:
-                self._process = subprocess.Popen(
-                    [binary, *args, str(path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            if not block:
-                return True
-            code = self._process.wait()
-            return code == 0
+            process = subprocess.Popen(
+                [binary, *args, str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except Exception:
-            log.warning("เล่นเสียงไม่สำเร็จ", exc_info=True)
+            log.warning("เริ่มเล่นเสียงไม่สำเร็จ", exc_info=True)
+            path.unlink(missing_ok=True)
+            return False
+
+        with self._lock:
+            self._process = process
+
+        if not block:
+            threading.Thread(
+                target=self._reap, args=(process, path), daemon=True
+            ).start()
+            return True
+
+        try:
+            return process.wait() == 0
+        except Exception:
+            log.warning("รอเสียงเล่นจบไม่สำเร็จ", exc_info=True)
             return False
         finally:
-            if block:
-                with self._lock:
-                    self._process = None
-                path.unlink(missing_ok=True)
+            self._release(process, path)
+
+    def _reap(self, process: subprocess.Popen, path: Path) -> None:
+        """รอให้กระบวนการเล่นเสียงจบแล้วเก็บกวาดไฟล์ชั่วคราว (ใช้กับโหมดไม่บล็อก)"""
+        try:
+            process.wait()
+        except Exception:
+            pass
+        finally:
+            self._release(process, path)
+
+    def _release(self, process: subprocess.Popen, path: Path) -> None:
+        """ล้างสถานะและลบไฟล์ชั่วคราว — ปลอดภัยเมื่อถูกเรียกซ้ำ"""
+        with self._lock:
+            # อย่าล้างทับ process ตัวใหม่ที่เพิ่งเริ่มเล่นหลังจากตัวนี้ถูกหยุด
+            if self._process is process:
+                self._process = None
+        path.unlink(missing_ok=True)
 
     def stop(self) -> None:
         """หยุดเสียงที่กำลังเล่นทันที (ใช้ตอนผู้ใช้พูดแทรก)"""

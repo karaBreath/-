@@ -120,17 +120,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "pip install 'thaivoice[speaker]'",
     )
 
+    from .thai_text import thai_segmenter_engine
+
+    engine = thai_segmenter_engine(force_probe=True)
     try:
         import pythainlp  # type: ignore # noqa: F401
 
-        thai_ok = True
+        installed = True
     except Exception:
-        thai_ok = False
+        installed = False
+    if engine:
+        detail = f"ใช้ pythainlp engine {engine}"
+    elif installed:
+        # กรณีนี้เจอบ่อย: ติดตั้ง pythainlp แล้วแต่ engine เริ่มต้นใช้ไม่ได้
+        detail = "ติดตั้ง pythainlp แล้วแต่ไม่มี engine ที่ใช้ได้ — ใช้กฎสำรองอยู่"
+    else:
+        detail = "ใช้กฎสำรอง (ยังทำงานได้)"
     line(
         "ตัดประโยคไทย",
-        thai_ok,
-        "ใช้ pythainlp" if thai_ok else "ใช้กฎสำรอง (ยังทำงานได้)",
-        "pip install 'thaivoice[thai]'",
+        engine is not None,
+        detail,
+        "pip install 'thaivoice[thai]'  (ต้องมี python-crfsuite ด้วย)",
     )
 
     store = MemoryStore(settings.db_path)

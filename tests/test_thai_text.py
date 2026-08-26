@@ -144,3 +144,84 @@ def test_สัดส่วนอักขระไทย():
     assert thai_ratio("hello") == 0.0
     assert thai_ratio("") == 0.0
     assert 0.0 < thai_ratio("hello สวัสดี") < 1.0
+
+
+class TestSegmenterEngine:
+    """เส้นทาง pythainlp เคยล้มแบบเงียบ ๆ เพราะ engine เริ่มต้น (crfcut) ต้องการ
+    python-crfsuite ที่ไม่ได้ติดมาด้วย เทสต์ชุดนี้กันไม่ให้กลับไปพังเงียบอีก
+    """
+
+    def test_คืนชื่อ_engine_หรือ_None_โดยไม่โยน_error(self):
+        from thaivoice.thai_text import _SENT_ENGINES, thai_segmenter_engine
+
+        engine = thai_segmenter_engine(force_probe=True)
+        assert engine is None or engine in _SENT_ENGINES
+
+    def test_ผลถูกแคชไว้ไม่ต้องตรวจซ้ำ(self):
+        from thaivoice import thai_text
+
+        first = thai_text.thai_segmenter_engine(force_probe=True)
+        assert thai_text._sent_engine_probed is True
+        assert thai_text.thai_segmenter_engine() == first
+
+    def test_ถอยไปใช้กฎสำรองเมื่อ_pythainlp_ใช้ไม่ได้(self, monkeypatch):
+        from thaivoice import thai_text
+
+        monkeypatch.setattr(thai_text, "_sent_engine", None)
+        monkeypatch.setattr(thai_text, "_sent_engine_probed", True)
+
+        parts = thai_text.split_sentences("สวัสดีครับ วันนี้อากาศดีมากเลยนะครับ ผมชื่อโบท")
+        assert parts, "ต้องยังตัดประโยคได้แม้ไม่มี pythainlp"
+        assert "".join(parts).replace(" ", "") == (
+            "สวัสดีครับวันนี้อากาศดีมากเลยนะครับผมชื่อโบท"
+        )
+
+    def test_engine_ที่พังต้องถูกข้ามไปตัวถัดไป(self, monkeypatch):
+        """จำลอง crfcut ที่ขาด dependency — ต้องเลื่อนไปใช้ engine ถัดไป ไม่ใช่ยอมแพ้"""
+        import sys
+        import types
+
+        from thaivoice import thai_text
+
+        calls = []
+
+        def fake_sent_tokenize(text, engine="crfcut"):
+            calls.append(engine)
+            if engine == "crfcut":
+                raise ModuleNotFoundError("No module named 'pycrfsuite'")
+            return [p for p in text.split() if p]
+
+        module = types.ModuleType("pythainlp.tokenize")
+        module.sent_tokenize = fake_sent_tokenize
+        parent = types.ModuleType("pythainlp")
+        parent.tokenize = module
+        monkeypatch.setitem(sys.modules, "pythainlp", parent)
+        monkeypatch.setitem(sys.modules, "pythainlp.tokenize", module)
+        monkeypatch.setattr(thai_text, "_sent_engine", None)
+        monkeypatch.setattr(thai_text, "_sent_engine_probed", False)
+
+        engine = thai_text.thai_segmenter_engine(force_probe=True)
+
+        assert calls[0] == "crfcut", "ต้องลอง engine ที่แม่นที่สุดก่อน"
+        assert engine == "thaisum", "crfcut พังแล้วต้องเลื่อนไปตัวถัดไป"
+
+    def test_pythainlp_พังทั้งหมดต้องคืน_None(self, monkeypatch):
+        import sys
+        import types
+
+        from thaivoice import thai_text
+
+        def always_fails(text, engine="crfcut"):
+            raise RuntimeError("พังทุก engine")
+
+        module = types.ModuleType("pythainlp.tokenize")
+        module.sent_tokenize = always_fails
+        parent = types.ModuleType("pythainlp")
+        parent.tokenize = module
+        monkeypatch.setitem(sys.modules, "pythainlp", parent)
+        monkeypatch.setitem(sys.modules, "pythainlp.tokenize", module)
+        monkeypatch.setattr(thai_text, "_sent_engine_probed", False)
+
+        assert thai_text.thai_segmenter_engine(force_probe=True) is None
+        # ยังต้องตัดประโยคได้ด้วยกฎสำรอง
+        assert thai_text.split_sentences("สวัสดีครับ ผมชื่อโบทนะครับ")
