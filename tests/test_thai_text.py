@@ -919,3 +919,34 @@ class Testตัวย่อหน่วยไทย:
             out += list(chunker.feed(ch))
         out += list(chunker.flush())
         assert all(len(chunk) > 4 for chunk in out), out
+
+
+class Testสะพานคำระหว่างคำบอกบริบทกับตัวเลข:
+    """การยอมให้มีคำไทยคั่นทำให้กฎกินประโยคธรรมดาเข้ามาด้วย
+
+    "โต๊ะที่นั่งกันเมื่อวาน 1234" ไม่ใช่รหัสโต๊ะ — "ที่นั่ง" เป็นคำบอกบริบท
+    แล้ว "กันเมื่อวาน" ถูกนับเป็นส่วนของคำนามประสม
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "โต๊ะที่นั่งกันเมื่อวาน 1234",
+            "เบอร์ที่ให้ไว้เมื่อวาน 1234",
+            "ชั้นของเขาอยู่ที่ 250",
+        ],
+    )
+    def test_คำเชื่อมที่เปิดอนุประโยคต้องไม่ถูกข้าม(self, text):
+        spoken = expand_numbers_for_speech(text)
+        assert " หนึ่ง สอง " not in spoken, spoken
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ห้องประชุม 2105", "ห้องประชุม สอง หนึ่ง ศูนย์ ห้า"),
+            ("รหัสพนักงาน 123456", "รหัสพนักงาน หนึ่ง สอง สาม สี่ ห้า หก"),
+            ("เลขที่ใบสั่งซื้อ 778899", "เลขที่ใบสั่งซื้อ เจ็ด เจ็ด แปด แปด เก้า เก้า"),
+        ],
+    )
+    def test_คำนามประสมยังข้ามได้(self, text, expected):
+        assert expand_numbers_for_speech(text) == expected
