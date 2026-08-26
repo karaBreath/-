@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thaivoice"
+version = "0.1.0"
+description = "ระบบสนทนาด้วยเสียงภาษาไทยที่จดจำผู้สนทนาได้ (Thai voice conversation with speaker memory)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=1.0.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# ไมโครโฟน + ลำโพง
+audio = ["sounddevice>=0.4.6", "numpy>=1.24", "webrtcvad>=2.0.10", "soundfile>=0.12"]
+# ถอดเสียงเป็นข้อความแบบรันเครื่องตัวเอง
+stt = ["faster-whisper>=1.0.0"]
+# สังเคราะห์เสียงไทย
+tts = ["edge-tts>=6.1.9", "gTTS>=2.5.0"]
+# จำลายเสียงผู้พูด
+speaker = ["resemblyzer>=0.1.4"]
+# HTTP API
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"]
+# ตัดคำ/ตัดประโยคภาษาไทยให้แม่นขึ้น
+thai = ["pythainlp>=5.0"]
+dev = ["pytest>=8.0"]
+all = [
+    "thaivoice[audio,stt,tts,speaker,server,thai,dev]",
+]
+
+[project.scripts]
+thaivoice = "thaivoice.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]
+testpaths = ["tests"]

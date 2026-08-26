@@ -1,0 +1,23 @@
+{
+  "name": "thaivoice-client",
+  "version": "0.1.0",
+  "description": "ไคลเอนต์ TypeScript สำหรับระบบสนทนาด้วยเสียงภาษาไทยที่จดจำผู้สนทนาได้",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./browser": "./dist/browserVoice.js"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.web.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist web/js"
+  },
+  "keywords": ["thai", "voice", "speech", "claude", "conversation", "memory"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

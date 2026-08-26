@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# ข้อมูล/ความจำ และไฟล์เสียง (ห้าม commit ข้อมูลส่วนบุคคล)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.wav
+*.mp3
+audio_cache/
+
+# ความลับ
+.env
+.env.local
+
+# ผลลัพธ์จากการ build ฝั่งเว็บ (สร้างด้วย npm run build)
+typescript/web/js/
