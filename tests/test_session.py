@@ -11,6 +11,7 @@ from thaivoice.memory import MemoryStore
 from thaivoice.session import (
     ConversationSession,
     _address,
+    _removed_summary,
     detect_forget_all,
     is_affirmative,
 )
@@ -506,3 +507,30 @@ class Testสำนวนถามชื่อที่ไม่มีช่อ�
         session._note_assistant_reply("แล้วเรียกว่าอะไรดีครับ")
         session.exchange("เดชครับ", speak=False)
         assert [s.display_name for s in store.list_speakers()] == ["เดช"]
+
+
+class Testข้อความสรุปการลบ:
+    """ไม่มีคนไทยคนไหนนับศูนย์พร้อมลักษณนาม"""
+
+    @pytest.mark.parametrize(
+        "removed,expected",
+        [
+            ({"facts": 0, "summaries": 0, "turns": 0}, "จริง ๆ แล้วยังไม่มีอะไรค้างอยู่เลย"),
+            ({"facts": 1, "summaries": 0, "turns": 0}, "สิ่งที่จำไว้เรื่องเดียว"),
+            (
+                {"facts": 3, "summaries": 0, "turns": 40},
+                "ทั้งสิ่งที่จำไว้ 3 เรื่อง และบทสนทนาเก่า 40 ข้อความ",
+            ),
+        ],
+    )
+    def test_ไม่พูดถึงของที่ไม่มี(self, removed, expected):
+        assert _removed_summary(removed) == expected
+
+    def test_มีอย่างเดียวต้องพูดว่าเรื่องเดียว(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        done = session.exchange("ยืนยัน", speaker=speaker, speak=False)
+
+        assert "เรื่องเดียว" in done.reply, done.reply
+        assert "ศูนย์" not in done.reply

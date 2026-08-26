@@ -893,3 +893,29 @@ class Testรหัสประจำตัวและช่วงราคา:
             out += list(chunker.feed(ch))
         out += list(chunker.flush())
         assert out[0] == "ครับผม พล.อ."
+
+
+class Testตัวย่อหน่วยไทย:
+    """TTS อ่านตัวย่อหน่วยเป็นชื่อตัวอักษร ("กอกอ") ส่วน kg/cm ถูกขยายอยู่แล้ว"""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("น้ำหนัก 3.2 กก.", "น้ำหนัก สาม จุด สอง กิโลกรัม"),
+            ("ส่วนสูง 50 ซม.", "ส่วนสูง ห้าสิบ เซนติเมตร"),
+            ("ระยะทาง 12 กม.", "ระยะทาง สิบสอง กิโลเมตร"),
+            ("ใช้เวลา 2 ชม.", "ใช้เวลา สอง ชั่วโมง"),
+            ("พื้นที่ 40 ตร.ม.", "พื้นที่ สี่สิบ ตารางเมตร"),
+        ],
+    )
+    def test_ขยายเป็นคำเต็ม(self, text, expected):
+        assert clean_for_speech(text) == expected
+
+    def test_คำลงท้ายเดี่ยวต้องไม่ถูกส่งไปพูดแยก(self):
+        """"ค่ะ" คำเดียวที่ถูกสังเคราะห์เสียงแยกฟังเหมือนคนละประโยค"""
+        chunker = SpeechChunker()
+        out = []
+        for ch in clean_for_speech("ส่วนสูง 50 ซม. ค่ะ ยินดีที่ได้รู้จักนะคะ"):
+            out += list(chunker.feed(ch))
+        out += list(chunker.flush())
+        assert all(len(chunk) > 4 for chunk in out), out

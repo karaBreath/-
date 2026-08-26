@@ -113,7 +113,7 @@
   <aside>
     <div class="panel">
       <h2>กำลังคุยกับ</h2>
-      <div id="speakerBox"><p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลยค่ะ</p></div>
+      <div id="speakerBox"><p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลย</p></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <h2>สิ่งที่จำได้เกี่ยวกับคุณ</h2>
@@ -131,6 +131,9 @@
 </footer>
 
 <script type="module">
+/** คำลงท้ายของผู้ช่วย — /health เป็นตัวบอก ค่านี้เป็นแค่ค่าตั้งต้นก่อนตอบกลับมา */
+let assistantParticle = "ค่ะ";
+
 import { ThaiVoiceClient } from "./js/client.js";
 import { VoiceConversation, browserRecognitionAvailable } from "./js/browserVoice.js";
 
@@ -196,7 +199,9 @@ async function refreshSpeaker(speaker) {
   currentSpeaker = speaker;
   speakerBox.replaceChildren();
   if (!speaker) {
-    speakerBox.append(el("p", "empty", "ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลยค่ะ"));
+    speakerBox.append(
+      el("p", "empty", `ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลย${assistantParticle}`),
+    );
     forgetBtn.disabled = true;
     return;
   }
@@ -371,8 +376,16 @@ fetch(`${location.origin}/health`)
   .then((r) => r.json())
   .then((health) => {
     const badge = document.getElementById("serverBadge");
+    if (health.closing) {
+      badge.textContent = "เซิร์ฟเวอร์กำลังปิดตัว";
+      badge.className = "badge warn";
+      return;
+    }
     badge.textContent = `เชื่อมต่อแล้ว · ${health.model}`;
     badge.className = "badge on";
+    // คำลงท้ายภาษาไทยบอกเพศของ "คนพูด" ถ้าหน้าเว็บฮาร์ดโค้ด "ค่ะ" ไว้แต่บอท
+    // ตั้งเป็นผู้ชาย ข้อความบนจอกับเสียงจะเป็นคนละเพศกัน
+    if (health.assistant_particle) assistantParticle = health.assistant_particle;
     const voiceBadge = document.getElementById("voiceIdBadge");
     voiceBadge.textContent = health.speaker_recognition
       ? `จำลายเสียง: เปิด · รู้จัก ${health.speakers} คน`

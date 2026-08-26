@@ -205,6 +205,29 @@ def _address(name: str) -> str:
     return name if name.startswith(_HAS_TITLE) else f"คุณ{name}"
 
 
+def _removed_summary(removed: dict[str, int]) -> str:
+    """สรุปว่าลบอะไรไปบ้าง โดยไม่พูดถึงของที่ไม่มี
+
+    ไม่มีคนไทยคนไหนนับศูนย์พร้อมลักษณนาม ("สิ่งที่จำไว้ศูนย์เรื่อง")
+    และของที่มีอย่างเดียวก็พูดว่า "เรื่องเดียว" ไม่ใช่ "หนึ่งเรื่อง"
+    """
+    parts: list[str] = []
+    for count, noun, classifier in (
+        (removed.get("facts", 0), "สิ่งที่จำไว้", "เรื่อง"),
+        (removed.get("summaries", 0), "บทสรุป", "ชุด"),
+        (removed.get("turns", 0), "บทสนทนาเก่า", "ข้อความ"),
+    ):
+        if count <= 0:
+            continue
+        amount = f"{classifier}เดียว" if count == 1 else f" {count} {classifier}"
+        parts.append(f"{noun}{amount}")
+    if not parts:
+        return "จริง ๆ แล้วยังไม่มีอะไรค้างอยู่เลย"
+    if len(parts) == 1:
+        return parts[0]
+    return "ทั้ง" + " ".join(parts[:-1]) + " และ" + parts[-1]
+
+
 def _soft(particle: str) -> str:
     """รูปของคำลงท้ายเมื่อตามหลัง "นะ" — ภาษาไทยใช้ "นะคะ" ไม่ใช่ "นะค่ะ" """
     return "คะ" if particle == "ค่ะ" else particle
@@ -468,10 +491,7 @@ class ConversationSession:
                 removed = self.store.forget_everything(speaker.id)
                 log.info("ลบความจำของ speaker %s: %s", speaker.id, removed)
                 return self._say(
-                    f"ลบให้เรียบร้อยแล้ว{particle} "
-                    f"สิ่งที่จำไว้ {removed['facts']} เรื่อง "
-                    f"บทสรุป {removed['summaries']} ชุด "
-                    f"และบทสนทนาเก่า {removed['turns']} ข้อความ "
+                    f"ลบให้เรียบร้อยแล้ว{particle} {_removed_summary(removed)} "
                     f"เริ่มรู้จักกันใหม่ได้เลย{particle}",
                     speaker,
                     speak,

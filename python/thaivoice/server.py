@@ -364,6 +364,10 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
             "stt": runtime.stt.name if runtime.stt else None,
             "tts": runtime.tts.name if runtime.tts else None,
             "speaker_recognition": runtime.identifier.enabled,
+            # หน้าเว็บต้องใช้คำลงท้ายเดียวกับที่บอทพูด — คำลงท้ายภาษาไทยบอกเพศ
+            # ของ "คนพูด" ถ้าหน้าเว็บฮาร์ดโค้ด "ค่ะ" ไว้แต่บอทตั้งเป็นผู้ชาย
+            # ข้อความบนจอกับเสียงจะเป็นคนละเพศกัน
+            "assistant_particle": settings.assistant_particle,
             "speakers": len(store.list_speakers()),
             "live_sessions": runtime.live_sessions,
         }

@@ -116,3 +116,23 @@ class Testถ้อยคำในบล็อกความจำ:
         block = build_memory_block(speaker, [], None, store.stats(speaker.id))
 
         assert "เริ่มรู้จักกันเมื่อ 3 ชั่วโมงก่อน" in block
+
+
+class Testกฎภาษาไทยใน_system_prompt:
+    """prompt คือที่ที่สอนโมเดลว่าจะพูดไทยยังไง ภาษาผิดตรงนี้ผิดไปทุกที่"""
+
+    def test_ต้องสอนกฎนะคะไม่ใช่นะค่ะ(self):
+        """เป็นจุดที่ผิดบ่อยที่สุดในภาษาไทย และ TTS อ่านความต่างออกมาตรง ๆ"""
+        prompt = base_system("ใจ", "ค่ะ")
+        assert "นะคะ" in prompt
+        assert "นะค่ะ" in prompt, "ต้องยกตัวอย่างสิ่งที่ห้ามเขียนด้วย"
+        assert 'ห้ามเขียน "นะค่ะ"' in prompt
+
+    def test_ต้องบอกสรรพนามของผู้ช่วยให้ตรงเพศกับคำลงท้าย(self):
+        """ของเดิมบอกแต่คำลงท้าย โมเดลจึงพูด "ผมจะช่วยดูให้ค่ะ" เป็นประจำ"""
+        assert "ดิฉัน" in base_system("ใจ", "ค่ะ")
+        assert "ผม" in base_system("ใจ", "ครับ")
+
+    def test_คำลงท้ายผู้ชายต้องไม่ถูกสอนกฎของผู้หญิง(self):
+        prompt = base_system("ใจ", "ครับ")
+        assert "คะ" not in prompt.replace("ครับ", "")
