@@ -32,13 +32,13 @@ export interface ChatResult {
   chunks: string[];
   speaker: Speaker | null;
   session_id: string;
+  /** เสียงคำตอบเป็น base64 — มีเมื่อขอ `speak: true` และเซิร์ฟเวอร์เปิด TTS ไว้ */
+  audio: string | null;
 }
 
 export interface VoiceResult extends ChatResult {
   transcript: string;
   identified_by: IdentifyMethod | null;
-  /** เสียงคำตอบเป็น base64 (มีเมื่อเปิด TTS ฝั่งเซิร์ฟเวอร์) */
-  audio: string | null;
 }
 
 export interface SpeakerDetail {
@@ -63,12 +63,23 @@ export type StreamEvent =
   /** ประโยคที่พูดได้แล้ว พร้อมเสียง (ถ้าเซิร์ฟเวอร์สังเคราะห์ให้) */
   | { type: "chunk"; text: string; audio?: string; mime?: string }
   /** จบเทิร์น */
-  | { type: "done"; text: string; speaker?: Speaker }
+  | {
+      type: "done";
+      text: string;
+      speaker?: Speaker;
+      identified_by?: IdentifyMethod;
+      score?: number;
+    }
   | { type: "error"; text: string };
 
 export interface ChatOptions {
   sessionId?: string;
+  /** ระบุตัวผู้พูดไว้ล่วงหน้า ข้ามการเดาจากลายเสียงและจากชื่อที่บอก */
   speakerId?: number;
-  /** ให้เซิร์ฟเวอร์สังเคราะห์เสียงคำตอบมาด้วยหรือไม่ */
+  /**
+   * ขอให้เซิร์ฟเวอร์สังเคราะห์เสียงคำตอบมาด้วย (ได้กลับมาใน `audio` เป็น base64)
+   *
+   * ค่าเริ่มต้นต่างกันตามปลายทาง: `chat()` ไม่ขอเสียง ส่วน `voice()` ขอเสียง
+   */
   speak?: boolean;
 }

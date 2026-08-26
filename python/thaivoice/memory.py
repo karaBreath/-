@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -22,9 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-__all__ = ["MemoryStore", "Speaker", "Turn", "Fact", "SpeakerStats"]
+__all__ = ["MemoryStore", "Speaker", "Turn", "Fact", "SpeakerStats", "normalize_name"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -38,6 +39,8 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 CREATE TABLE IF NOT EXISTS speakers (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     display_name TEXT    NOT NULL,
+    -- ชื่อที่ normalize แล้ว ใช้เป็นกุญแจกันสร้างคนซ้ำเมื่อมีหลายคำขอพร้อมกัน
+    name_key     TEXT,
     nickname     TEXT,
     gender       TEXT,              -- 'male' | 'female' | NULL (เดาจากคำลงท้าย)
     particle     TEXT,              -- คำลงท้ายที่บอทใช้กับคนนี้: ครับ / ค่ะ
@@ -145,6 +148,14 @@ class SpeakerStats:
     last_seen: float | None
 
 
+def normalize_name(name: str) -> str:
+    """ทำชื่อให้เป็นรูปมาตรฐานสำหรับใช้เทียบและกันซ้ำ
+
+    ตัดช่องว่างหัวท้าย ยุบช่องว่างซ้อน และลดเป็นตัวพิมพ์เล็ก
+    """
+    return " ".join((name or "").split()).lower()
+
+
 def _row_to_speaker(row: sqlite3.Row) -> Speaker:
     try:
         meta = json.loads(row["meta_json"] or "{}")
@@ -176,11 +187,37 @@ class MemoryStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """อัปเกรดฐานข้อมูลเก่าให้เข้ากับ schema ปัจจุบัน (เรียกใต้ lock แล้ว)"""
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(speakers)").fetchall()
+        }
+        needs_backfill = "name_key" not in columns
+        if needs_backfill:
+            # ฐานข้อมูลจาก schema เวอร์ชัน 1 — เติมคอลัมน์แล้วเติมค่าย้อนหลัง
+            self._conn.execute("ALTER TABLE speakers ADD COLUMN name_key TEXT")
+            for row in self._conn.execute(
+                "SELECT id, display_name FROM speakers"
+            ).fetchall():
+                self._conn.execute(
+                    "UPDATE speakers SET name_key = ? WHERE id = ?",
+                    (normalize_name(row["display_name"]), row["id"]),
+                )
+
+        # สร้าง index หลัง migration เสมอ เพราะตารางที่มีอยู่แล้วจาก schema เวอร์ชัน 1
+        # ยังไม่มีคอลัมน์นี้ตอนที่รัน schema หลัก
+        self._conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_speakers_name_key
+               ON speakers(name_key) WHERE name_key IS NOT NULL AND name_key <> ''"""
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -203,15 +240,19 @@ class MemoryStore:
         language: str = "th",
         meta: dict[str, Any] | None = None,
     ) -> Speaker:
+        clean = " ".join((display_name or "").split())
+        if not clean:
+            raise ValueError("ชื่อผู้สนทนาว่างเปล่า")
         now = time.time()
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO speakers
-                   (display_name, nickname, gender, particle, language, meta_json,
-                    created_at, last_seen_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (display_name, name_key, nickname, gender, particle, language,
+                    meta_json, created_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    display_name.strip(),
+                    clean,
+                    normalize_name(clean),
                     nickname,
                     gender,
                     particle,
@@ -227,6 +268,30 @@ class MemoryStore:
         assert got is not None
         return got
 
+    def get_or_create_speaker(self, display_name: str, **fields: Any) -> tuple[Speaker, bool]:
+        """หาคนจากชื่อ ถ้าไม่มีก็สร้าง — ปลอดภัยเมื่อมีหลายคำขอพร้อมกัน
+
+        คืน ``(speaker, created)``
+
+        การทำ find-then-create แยกกันสองคำสั่งทำให้เกิด race: คำขอพร้อมกันหลายตัว
+        ต่างก็หาไม่เจอแล้วต่างก็สร้าง ได้คนซ้ำหลายแถวสำหรับคนคนเดียว และความจำจะ
+        กระจัดกระจายไปคนละแถว ที่นี่จึงพึ่ง UNIQUE index บน name_key เป็นตัวตัดสิน
+        """
+        clean = " ".join((display_name or "").split())
+        if not clean:
+            raise ValueError("ชื่อผู้สนทนาว่างเปล่า")
+        existing = self.find_speaker_by_name(clean)
+        if existing is not None:
+            return existing, False
+        try:
+            return self.create_speaker(clean, **fields), True
+        except sqlite3.IntegrityError:
+            # มีคำขออื่นสร้างไปก่อนหน้าเสี้ยววินาที — ใช้ของเขา
+            found = self.find_speaker_by_name(clean)
+            if found is None:  # pragma: no cover - ไม่ควรเกิด
+                raise
+            return found, False
+
     def get_speaker(self, speaker_id: int) -> Speaker | None:
         with self._lock:
             row = self._conn.execute(
@@ -236,13 +301,13 @@ class MemoryStore:
 
     def find_speaker_by_name(self, name: str) -> Speaker | None:
         """หาคนจากชื่อหรือชื่อเล่น (ไม่สนตัวพิมพ์ใหญ่เล็ก และตัดช่องว่างหัวท้าย)"""
-        needle = name.strip().lower()
+        needle = normalize_name(name)
         if not needle:
             return None
         with self._lock:
             row = self._conn.execute(
                 """SELECT * FROM speakers
-                   WHERE lower(trim(display_name)) = ? OR lower(trim(nickname)) = ?
+                   WHERE name_key = ? OR lower(trim(nickname)) = ?
                    ORDER BY last_seen_at DESC LIMIT 1""",
                 (needle, needle),
             ).fetchone()
@@ -274,6 +339,9 @@ class MemoryStore:
             elif key in allowed:
                 sets.append(f"{key} = ?")
                 values.append(value)
+                if key == "display_name":
+                    sets.append("name_key = ?")
+                    values.append(normalize_name(str(value)))
         if not sets:
             return self.get_speaker(speaker_id)
         values.append(speaker_id)
@@ -311,6 +379,13 @@ class MemoryStore:
         vec = [float(x) for x in embedding]
         if not vec:
             raise ValueError("embedding ว่างเปล่า")
+        # NaN/inf เกิดได้จริงเมื่อส่งเสียงเงียบสนิทหรือไฟล์ 0 เฟรมเข้าตัวสร้าง
+        # embedding ถ้าปล่อยให้บันทึก ค่าเฉลี่ยสะสมของคนคนนั้นจะกลายเป็น NaN
+        # ถาวร และจะจำเขาไม่ได้อีกเลย
+        if not all(math.isfinite(x) for x in vec):
+            raise ValueError("embedding มีค่า NaN หรือ inf — ปฏิเสธเพื่อไม่ให้ลายเสียงเสียถาวร")
+        if not any(x for x in vec):
+            raise ValueError("embedding เป็นศูนย์ทั้งหมด — น่าจะมาจากเสียงเงียบ")
         now = time.time()
         with self._lock:
             row = self._conn.execute(
@@ -487,6 +562,34 @@ class MemoryStore:
             )
             self._conn.commit()
             return cur.rowcount
+
+    def forget_everything(self, speaker_id: int) -> dict[str, int]:
+        """ลบความจำทั้งหมดของคนคนนี้ แต่ยังรู้จักตัวเขาอยู่
+
+        ต้องลบทั้ง facts, summaries และ turns — การลบแค่ facts ทำให้บทสรุปและ
+        บทสนทนาดิบยังไหลกลับเข้า prompt รอบถัดไป ซึ่งเท่ากับโกหกผู้ใช้ว่าลบแล้ว
+        """
+        with self._lock:
+            removed = {
+                "facts": self._conn.execute(
+                    "DELETE FROM facts WHERE speaker_id = ?", (speaker_id,)
+                ).rowcount,
+                "summaries": self._conn.execute(
+                    "DELETE FROM summaries WHERE speaker_id = ?", (speaker_id,)
+                ).rowcount,
+                "turns": self._conn.execute(
+                    "DELETE FROM turns WHERE speaker_id = ?", (speaker_id,)
+                ).rowcount,
+            }
+            self._conn.commit()
+        return {key: max(0, value) for key, value in removed.items()}
+
+    def speaker_exists(self, speaker_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM speakers WHERE id = ?", (speaker_id,)
+            ).fetchone()
+        return row is not None
 
     # ── บทสรุปสะสม ──────────────────────────────────────────────────────
     def save_summary(self, speaker_id: int, content: str, through_turn_id: int) -> None:

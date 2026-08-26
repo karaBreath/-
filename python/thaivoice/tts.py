@@ -29,7 +29,7 @@ from .thai_text import clean_for_speech
 
 log = logging.getLogger("thaivoice.tts")
 
-__all__ = ["Speech", "TextToSpeech", "load_tts", "voice_for_speaker"]
+__all__ = ["Speech", "TextToSpeech", "load_tts", "voice_for_assistant"]
 
 
 @dataclass
@@ -166,13 +166,14 @@ class SilentTTS(ClientSideTTS):
     name = "none"
 
 
-def voice_for_speaker(settings: Settings, gender: str | None) -> str:
-    """เลือกเสียงบอทให้เข้ากับคู่สนทนา
+def voice_for_assistant(settings: Settings) -> str:
+    """เสียงของบอท — ขึ้นกับเพศของ *ตัวบอทเอง* ไม่ใช่ของผู้ฟัง
 
-    ตามธรรมเนียมไทย ผู้ช่วยมักเป็นเสียงผู้หญิงลงท้าย "ค่ะ" แต่ถ้าผู้ใช้ตั้งค่า
-    เสียงผู้ชายไว้ ระบบจะเคารพค่านั้น ฟังก์ชันนี้เป็นจุดเดียวที่ตัดสินใจเรื่องเสียง
+    ของเดิมเลือกเสียงจากเพศของคู่สนทนา ซึ่งผิดหลักภาษาไทย (คำลงท้ายและน้ำเสียง
+    บอกเพศของคนพูด) และยังเทียบกับค่า "male_voice" ที่ไม่มีอยู่จริงในระบบ
+    ทำให้ค่า THAIVOICE_TTS_VOICE_MALE ไม่เคยถูกใช้เลย
     """
-    return settings.tts_voice_male if gender == "male_voice" else settings.tts_voice_female
+    return settings.assistant_voice
 
 
 def load_tts(settings: Settings | None = None) -> TextToSpeech | None:
@@ -184,7 +185,7 @@ def load_tts(settings: Settings | None = None) -> TextToSpeech | None:
     backend = settings.tts_backend.strip().lower()
     try:
         if backend in {"edge", "edge-tts"}:
-            return EdgeTTS(settings.tts_voice_female, settings.tts_rate)
+            return EdgeTTS(voice_for_assistant(settings), settings.tts_rate)
         if backend == "gtts":
             return GttsTTS()
         if backend == "azure":
@@ -193,7 +194,7 @@ def load_tts(settings: Settings | None = None) -> TextToSpeech | None:
             return AzureTTS(
                 os.environ.get("AZURE_SPEECH_KEY", ""),
                 os.environ.get("AZURE_SPEECH_REGION", "southeastasia"),
-                settings.tts_voice_female,
+                voice_for_assistant(settings),
             )
         if backend == "browser":
             return ClientSideTTS()

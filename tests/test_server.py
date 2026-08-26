@@ -9,31 +9,48 @@ fastapi = pytest.importorskip("fastapi", reason="ต้องติดตั้�
 from fastapi.testclient import TestClient  # noqa: E402
 
 from thaivoice import server as server_module  # noqa: E402
-from thaivoice.brain import ThaiBrain  # noqa: E402
 from thaivoice.memory import MemoryStore  # noqa: E402
-from thaivoice.session import ConversationSession  # noqa: E402
-from thaivoice.speaker import SpeakerIdentifier  # noqa: E402
 from thaivoice.stt import pcm_to_wav  # noqa: E402
+from thaivoice.tts import Speech  # noqa: E402
+
+
+class CountingTTS:
+    """TTS ปลอมที่นับจำนวนครั้งที่ถูกเรียก"""
+
+    name = "counting"
+    mime = "audio/mpeg"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def synthesize(self, text: str, voice: str | None = None) -> Speech:
+        self.calls.append(text)
+        return Speech(audio=b"MP3" + text.encode()[:8], mime=self.mime, text=text)
 
 
 @pytest.fixture
-def client(monkeypatch, settings, fake_client: FakeAnthropic):
-    """สร้างแอปที่ทุก session ใช้ Claude ปลอมและตัวจำเสียงปลอม"""
+def tts() -> CountingTTS:
+    return CountingTTS()
 
-    def fake_create_session(cfg=None, *, store=None, session_id=None, **kwargs):
-        memory = store or MemoryStore(settings.db_path)
-        return ConversationSession(
-            store=memory,
-            brain=ThaiBrain(memory, client=fake_client, settings=settings),
-            identifier=SpeakerIdentifier(
-                memory, FakeEmbedder(), threshold=0.9, margin=0.02
-            ),
-            settings=settings,
-            session_id=session_id,
-        )
 
-    monkeypatch.setattr(server_module, "create_session", fake_create_session)
-    with TestClient(server_module.create_app(settings)) as test_client:
+@pytest.fixture
+def runtime(settings, fake_client: FakeAnthropic, tts: CountingTTS):
+    made = server_module.ServerRuntime(
+        settings,
+        store=MemoryStore(":memory:"),
+        client=fake_client,
+        embedder=FakeEmbedder(),
+        tts=tts,
+        stt=None,
+        with_memory_extraction=False,
+    )
+    yield made
+    made.close()
+
+
+@pytest.fixture
+def client(settings, runtime):
+    with TestClient(server_module.create_app(settings, runtime=runtime)) as test_client:
         yield test_client
 
 
@@ -55,11 +72,9 @@ class TestBasics:
 
 class TestChat:
     def test_คุยด้วยข้อความแล้วสร้างผู้สนทนา(self, client):
-        response = client.post(
+        data = client.post(
             "/api/chat", json={"text": "สวัสดีครับ ผมชื่อเดชครับ", "speak": False}
-        )
-        assert response.status_code == 200
-        data = response.json()
+        ).json()
         assert data["reply"]
         assert data["speaker"]["name"] == "เดช"
 
@@ -73,11 +88,69 @@ class TestChat:
         ).json()
         assert data["speaker"]["id"] == speaker_id
 
+    def test_speaker_id_ที่ไม่มีจริงต้องได้_404(self, client):
+        """ของเดิมเงียบ ๆ ถือว่าไม่ระบุ แล้วตกไปใช้ผู้พูดคนก่อนของ session นั้น"""
+        for bogus in (999999, -1):
+            response = client.post(
+                "/api/chat", json={"text": "สวัสดี", "speaker_id": bogus}
+            )
+            assert response.status_code == 404, bogus
+
+    def test_ข้อความว่างต้องได้_422(self, client):
+        assert client.post("/api/chat", json={"text": "   "}).status_code == 422
+
+    def test_ข้อความยาวเกินต้องถูกปฏิเสธ(self, client):
+        response = client.post("/api/chat", json={"text": "ก" * 5000})
+        assert response.status_code == 422
+
     def test_บทสนทนาถูกบันทึกไว้(self, client):
         client.post("/api/chat", json={"text": "ผมชื่อเดชครับ", "speak": False})
         speakers = client.get("/api/speakers").json()["speakers"]
         detail = client.get(f"/api/speakers/{speakers[0]['id']}").json()
         assert len(detail["recent_turns"]) >= 2
+
+    def test_ขอเสียงคำตอบมาด้วยได้(self, client, tts):
+        data = client.post("/api/chat", json={"text": "สวัสดี", "speak": True}).json()
+        assert data["audio"], "ขอ speak=True แล้วต้องได้เสียงกลับมา"
+        assert len(tts.calls) == 1, f"ต้องสังเคราะห์ครั้งเดียว ไม่ใช่ {len(tts.calls)}"
+
+
+class TestCrossUserIsolation:
+    def test_คำขอที่ไม่ระบุ_session_id_ต้องไม่สวมรอยกัน(self, client, runtime):
+        """คนที่สองที่ไม่ระบุตัวตนต้องไม่ได้เห็นความจำของคนแรก
+
+        นี่คือเส้นทางหลักที่ README แนะนำ (เบราว์เซอร์ถอดเสียงเองแล้วส่งข้อความ)
+        จึงไม่ใช่เคสมุมเล็ก ๆ แต่เป็นค่าเริ่มต้น
+        """
+        first = client.post(
+            "/api/chat", json={"text": "สวัสดีครับ ผมชื่อสมชายครับ"}
+        ).json()
+        runtime.store.upsert_fact(first["speaker"]["id"], "รหัสตู้เซฟ", "ลับสุดยอด")
+
+        second = client.post("/api/chat", json={"text": "ตอนนี้กี่โมงแล้ว"}).json()
+
+        assert second["speaker"] is None, "ต้องไม่ถือว่าเป็นคนเดิม"
+
+    def test_ระบุ_session_id_เดียวกันถึงจะจำคนเดิม(self, client):
+        client.post(
+            "/api/chat", json={"text": "ผมชื่อสมชายครับ", "session_id": "ห้อง-ก"}
+        )
+        second = client.post(
+            "/api/chat", json={"text": "ตอนนี้กี่โมงแล้ว", "session_id": "ห้อง-ก"}
+        ).json()
+        assert second["speaker"]["name"] == "สมชาย"
+
+    def test_คนละ_session_ไม่เห็นกัน(self, client):
+        client.post("/api/chat", json={"text": "ผมชื่อสมชายครับ", "session_id": "ห้อง-ก"})
+        other = client.post(
+            "/api/chat", json={"text": "ตอนนี้กี่โมงแล้ว", "session_id": "ห้อง-ข"}
+        ).json()
+        assert other["speaker"] is None
+
+    def test_จำนวน_session_ไม่บานปลาย(self, client, runtime):
+        for index in range(server_module.MAX_LIVE_SESSIONS + 40):
+            client.post("/api/chat", json={"text": "สวัสดี", "session_id": f"s{index}"})
+        assert runtime.live_sessions <= server_module.MAX_LIVE_SESSIONS
 
 
 class TestVoice:
@@ -109,6 +182,37 @@ class TestVoice:
         assert second["speaker"]["name"] == "เดช"
         assert second["identified_by"] == "voice"
 
+    def test_สังเคราะห์เสียงครั้งเดียวต่อหนึ่งเทิร์น(self, client, tts, fake_client):
+        """ของเดิมสังเคราะห์ทุกท่อนแล้วทิ้ง จากนั้นสังเคราะห์คำตอบเต็มอีกรอบ"""
+        fake_client.replies = ["สวัสดีค่ะ ยินดีที่ได้รู้จักนะคะ วันนี้เป็นยังไงบ้างคะ"]
+        client.post(
+            "/api/voice",
+            files={"audio": ("u.wav", _wav(), "audio/wav")},
+            data={"transcript": "สวัสดี", "speak": "true"},
+        )
+        assert len(tts.calls) == 1, tts.calls
+
+    def test_ระบุ_speaker_id_ผ่าน_form_ได้(self, client):
+        created = client.post("/api/speakers", json={"name": "มะลิ"}).json()
+        data = client.post(
+            "/api/voice",
+            files={"audio": ("u.wav", _wav(), "audio/wav")},
+            data={
+                "transcript": "สวัสดี",
+                "speaker_id": str(created["speaker"]["id"]),
+                "speak": "false",
+            },
+        ).json()
+        assert data["speaker"]["name"] == "มะลิ"
+
+    def test_speaker_id_ที่ไม่ใช่ตัวเลข(self, client):
+        response = client.post(
+            "/api/voice",
+            files={"audio": ("u.wav", _wav(), "audio/wav")},
+            data={"transcript": "สวัสดี", "speaker_id": "abc"},
+        )
+        assert response.status_code == 422
+
     def test_ไม่มีทั้งเสียงที่ถอดได้และตัวถอดเสียง(self, client):
         response = client.post(
             "/api/voice",
@@ -118,13 +222,25 @@ class TestVoice:
         assert response.status_code == 400
         assert "transcript" in response.json()["detail"]
 
-    def test_ไฟล์เสียงเสียหาย(self, client):
+    @pytest.mark.parametrize(
+        "payload", ["ไม่ใช่ไฟล์เสียง".encode(), b"", b"RIFF" + b"\x00" * 20]
+    )
+    def test_ไฟล์เสียงเสียหายต้องได้_4xx_ไม่ใช่_500(self, client, payload):
         response = client.post(
             "/api/voice",
-            files={"audio": ("u.wav", "ไม่ใช่ไฟล์เสียง".encode(), "audio/wav")},
+            files={"audio": ("u.wav", payload, "audio/wav")},
             data={"transcript": "สวัสดี"},
         )
-        assert response.status_code == 400
+        assert 400 <= response.status_code < 500, response.status_code
+
+    def test_ไฟล์ใหญ่เกินถูกปฏิเสธ(self, client):
+        big = b"\x00" * (server_module.MAX_UPLOAD_BYTES + 10)
+        response = client.post(
+            "/api/voice",
+            files={"audio": ("u.wav", big, "audio/wav")},
+            data={"transcript": "สวัสดี"},
+        )
+        assert response.status_code == 413
 
 
 class TestSpeakerManagement:
@@ -140,10 +256,32 @@ class TestSpeakerManagement:
         assert client.delete(f"/api/speakers/{speaker_id}").json()["deleted"] is True
         assert client.get(f"/api/speakers/{speaker_id}").status_code == 404
 
-    def test_ลบเฉพาะข้อเท็จจริง(self, client):
+    @pytest.mark.parametrize("name", ["", "   ", "\n\t "])
+    def test_ชื่อว่างต้องถูกปฏิเสธ(self, client, name):
+        """ของเดิมสร้างแถวใหม่ทุกครั้งที่ส่งชื่อว่างมา"""
+        assert client.post("/api/speakers", json={"name": name}).status_code == 422
+
+    def test_ชื่อยาวเกินถูกปฏิเสธ(self, client):
+        assert client.post("/api/speakers", json={"name": "ก" * 200}).status_code == 422
+
+    def test_ลบเฉพาะข้อเท็จจริง(self, client, runtime):
         speaker_id = client.post("/api/speakers", json={"name": "มะลิ"}).json()["speaker"]["id"]
-        assert client.delete(f"/api/speakers/{speaker_id}/facts").json() == {"removed": 0}
-        assert client.get(f"/api/speakers/{speaker_id}").status_code == 200
+        runtime.store.upsert_fact(speaker_id, "ก", "1")
+        runtime.store.record_turn(speaker_id, "s", "user", "เก็บไว้")
+
+        assert client.delete(f"/api/speakers/{speaker_id}/facts").json() == {"removed": 1}
+        assert runtime.store.recent_turns(speaker_id), "บทสนทนายังต้องอยู่"
+
+    def test_ลบความจำทั้งหมด(self, client, runtime):
+        speaker_id = client.post("/api/speakers", json={"name": "มะลิ"}).json()["speaker"]["id"]
+        runtime.store.upsert_fact(speaker_id, "ก", "1")
+        runtime.store.record_turn(speaker_id, "s", "user", "ความลับ")
+        runtime.store.save_summary(speaker_id, "สรุป", 1)
+
+        removed = client.delete(f"/api/speakers/{speaker_id}/memory").json()["removed"]
+        assert removed == {"facts": 1, "summaries": 1, "turns": 1}
+        assert runtime.store.recent_turns(speaker_id) == []
+        assert runtime.store.latest_summary(speaker_id) is None
 
     def test_สอนลายเสียงผ่าน_api(self, client):
         speaker_id = client.post("/api/speakers", json={"name": "มะลิ"}).json()["speaker"]["id"]
@@ -156,7 +294,9 @@ class TestSpeakerManagement:
     def test_ถามว่าเสียงนี้คือใคร(self, client):
         speaker_id = client.post("/api/speakers", json={"name": "มะลิ"}).json()["speaker"]["id"]
         wav = _wav(b"\xaa\xbb\xcc")
-        client.post(f"/api/speakers/{speaker_id}/enroll", files={"audio": ("s.wav", wav, "audio/wav")})
+        client.post(
+            f"/api/speakers/{speaker_id}/enroll", files={"audio": ("s.wav", wav, "audio/wav")}
+        )
 
         data = client.post("/api/identify", files={"audio": ("s.wav", wav, "audio/wav")}).json()
         assert data["speaker"]["id"] == speaker_id
@@ -184,7 +324,7 @@ class TestWebSocket:
 
     def test_ส่งเสียงมาด้วยเพื่อระบุตัวผู้พูด(self, client):
         audio = base64.b64encode(_wav(b"\x12\x34\x56")).decode()
-        with client.websocket_connect("/ws/chat") as socket:
+        with client.websocket_connect("/ws/chat?session_id=t2") as socket:
             socket.send_json({"text": "ผมชื่อเอกครับ", "audio": audio, "speak": False})
             while socket.receive_json()["type"] != "done":
                 pass
@@ -194,7 +334,50 @@ class TestWebSocket:
         assert first["speaker"]["name"] == "เอก"
         assert first["identified_by"] == "voice"
 
-    def test_ข้อความว่างได้error(self, client):
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"text": "   "},
+            {"text": "hi", "speaker_id": "xyz"},
+            {"text": "hi", "speaker_id": 999999},
+            {"text": 12345},
+            {"text": None},
+            {},
+            [1, 2, 3],
+            "แค่สตริง",
+            42,
+            None,
+        ],
+    )
+    def test_ข้อมูลผิดรูปต้องได้_error_frame_ไม่ใช่ค้างตลอดกาล(self, client, payload):
+        """ของเดิมปิดการเชื่อมต่อเงียบ ๆ ทำให้ไคลเอนต์รอคำตอบที่ไม่มีวันมา"""
         with client.websocket_connect("/ws/chat") as socket:
-            socket.send_json({"text": "   "})
+            socket.send_json(payload)
+            event = socket.receive_json()
+            assert event["type"] == "error", event
+            assert event["text"]
+
+    def test_การเชื่อมต่อยังใช้ต่อได้หลังเจอ_error(self, client):
+        with client.websocket_connect("/ws/chat?session_id=t3") as socket:
+            socket.send_json({"text": ""})
             assert socket.receive_json()["type"] == "error"
+
+            socket.send_json({"text": "สวัสดี", "speak": False})
+            kinds = []
+            while True:
+                event = socket.receive_json()
+                kinds.append(event["type"])
+                if event["type"] == "done":
+                    break
+            assert "done" in kinds
+
+    def test_โมเดลพังต้องได้_error_frame(self, client, fake_client):
+        """ถ้าเรียกโมเดลไม่สำเร็จ ต้องบอกไคลเอนต์ ไม่ใช่ปิดการเชื่อมต่อเงียบ ๆ"""
+        fake_client.fail_with = RuntimeError("โมเดลล่ม")
+        with client.websocket_connect("/ws/chat?session_id=t4") as socket:
+            socket.send_json({"text": "สวัสดี", "speak": False})
+            events = [socket.receive_json(), socket.receive_json()]
+
+        assert events[0]["type"] == "speaker"
+        assert events[1]["type"] == "error"
+        assert "โมเดลล่ม" in events[1]["text"]

@@ -58,10 +58,14 @@ class FakeMessages:
 
     def stream(self, **kwargs: Any) -> FakeStream:
         self.parent.calls.append(kwargs)
+        if self.parent.fail_with is not None:
+            raise self.parent.fail_with
         return FakeStream(self.parent.next_reply(), self.parent.stop_reason)
 
     def create(self, **kwargs: Any) -> FakeMessage:
         self.parent.calls.append(kwargs)
+        if self.parent.fail_with is not None:
+            raise self.parent.fail_with
         return FakeMessage([FakeTextBlock(self.parent.next_reply())])
 
     def parse(self, **kwargs: Any):
@@ -93,6 +97,8 @@ class FakeAnthropic:
         self.parsed_outputs: list[Any] = []
         self.calls: list[dict] = []
         self.stop_reason = "end_turn"
+        # ตั้งเป็น exception เพื่อจำลองว่าโมเดลล่ม
+        self.fail_with: BaseException | None = None
         self._index = 0
 
     def next_reply(self) -> str:

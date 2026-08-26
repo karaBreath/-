@@ -83,12 +83,31 @@ class TestVoiceprints:
     def test_เฉลี่ยลายเสียงสะสม(self, store: MemoryStore):
         """ยิ่งคุยบ่อย ลายเสียงยิ่งควรนิ่งขึ้น — จึงเฉลี่ยแบบถ่วงน้ำหนัก"""
         speaker = store.create_speaker("เดช")
-        store.save_voiceprint(speaker.id, [0.0, 0.0, 0.0], "fake")
-        store.save_voiceprint(speaker.id, [1.0, 1.0, 1.0], "fake")
+        store.save_voiceprint(speaker.id, [0.2, 0.2, 0.2], "fake")
+        store.save_voiceprint(speaker.id, [0.8, 0.8, 0.8], "fake")
 
         prints = store.all_voiceprints("fake")
         assert len(prints) == 1
         assert prints[0][1] == pytest.approx([0.5, 0.5, 0.5], abs=1e-6)
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            [float("nan")] * 3,
+            [float("inf"), 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+    )
+    def test_ปฏิเสธลายเสียงที่เสีย(self, store: MemoryStore, broken):
+        """ลายเสียง NaN หนึ่งอันเคยทำให้ระบบจำเสียงใครไม่ได้เลยทั้งระบบ
+
+        เพราะการเทียบกับ NaN ให้ผลเป็นเท็จทุกกรณี และค่าเฉลี่ยสะสมของคนคนนั้น
+        จะกลายเป็น NaN ถาวร เกิดได้จริงเมื่อส่งไฟล์เสียง 0 เฟรมหรือเสียงเงียบสนิท
+        """
+        speaker = store.create_speaker("เดช")
+        with pytest.raises(ValueError):
+            store.save_voiceprint(speaker.id, broken, "fake")
+        assert store.all_voiceprints("fake") == []
 
     def test_มิติไม่ตรงกันต้องแจ้งเตือน(self, store: MemoryStore):
         speaker = store.create_speaker("เดช")

@@ -56,6 +56,13 @@ class Settings:
     assistant_name: str = field(
         default_factory=lambda: _s("THAIVOICE_ASSISTANT_NAME", "ใจ")
     )
+    # เพศของ "ตัวผู้ช่วย" ไม่ใช่ของผู้ใช้ — ใช้กำหนดทั้งเสียงและคำลงท้ายของบอท
+    #
+    # ในภาษาไทยคำลงท้าย ครับ/ค่ะ บอกเพศของ *คนพูด* ไม่ใช่คนฟัง ถ้าไปสะท้อนเพศ
+    # ของผู้ใช้ บอทเสียงผู้หญิงจะลงท้ายว่า "ครับ" ซึ่งฟังผิดทันที
+    assistant_gender: str = field(
+        default_factory=lambda: _s("THAIVOICE_ASSISTANT_GENDER", "female")
+    )
     memory_model: str = field(
         default_factory=lambda: _s("THAIVOICE_MEMORY_MODEL", "")
         or _s("THAIVOICE_MODEL", "claude-opus-5")
@@ -104,6 +111,20 @@ class Settings:
     host: str = field(default_factory=lambda: _s("THAIVOICE_HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _i("THAIVOICE_PORT", 8080))
     cors_origins: str = field(default_factory=lambda: _s("THAIVOICE_CORS_ORIGINS", ""))
+
+    @property
+    def assistant_particle(self) -> str:
+        """คำลงท้ายที่บอทใช้กับทุกคน (ตามเพศของตัวบอทเอง)"""
+        return "ครับ" if self.assistant_gender == "male" else "ค่ะ"
+
+    @property
+    def assistant_voice(self) -> str:
+        """เสียง TTS ที่ตรงกับเพศของบอท"""
+        return (
+            self.tts_voice_male
+            if self.assistant_gender == "male"
+            else self.tts_voice_female
+        )
 
     @property
     def cors_list(self) -> list[str]:

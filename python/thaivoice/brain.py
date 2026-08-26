@@ -32,7 +32,7 @@ __all__ = ["ThaiBrain", "BrainEvent", "MissingCredentialsError", "REFUSAL_REPLY"
 # เซิร์ฟเวอร์จะสลับไปโมเดลที่เหมาะสมให้เอง แทนที่บทสนทนาจะเงียบไปเฉย ๆ
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-REFUSAL_REPLY = "ขอโทษครับ เรื่องนี้ผมตอบให้ไม่ได้ ลองถามเรื่องอื่นได้เลยครับ"
+REFUSAL_REPLY = "ขอโทษค่ะ เรื่องนี้ตอบให้ไม่ได้ ลองถามเรื่องอื่นได้เลยค่ะ"
 
 _NO_CREDENTIALS_HINT = (
     "ยังไม่ได้ตั้งค่าคีย์สำหรับเรียก Claude\n"
@@ -71,19 +71,23 @@ class ThaiBrain:
         self.settings = settings or get_settings()
         # ไม่ส่ง api_key ตรง ๆ — SDK จะหาจาก ANTHROPIC_API_KEY หรือโปรไฟล์ ant auth
         self.client = client or anthropic.Anthropic()
-        self._base_system = base_system(self.settings.assistant_name)
+        self._base_system = base_system(
+            self.settings.assistant_name, self.settings.assistant_particle
+        )
         self._use_fallbacks = True
 
     # ── ประกอบ prompt ───────────────────────────────────────────────────
     def build_system(self, speaker: Speaker | None, voice_enabled: bool) -> list[dict]:
+        particle = self.settings.assistant_particle
         if speaker is None:
-            memory = unknown_speaker_block(voice_enabled)
+            memory = unknown_speaker_block(voice_enabled, particle)
         else:
             memory = build_memory_block(
                 speaker,
                 self.store.facts_for(speaker.id),
                 (self.store.latest_summary(speaker.id) or (None, 0))[0],
                 self.store.stats(speaker.id),
+                assistant_particle=particle,
             )
         return [
             # ส่วนคงที่มาก่อนเสมอ และทำเครื่องหมายแคชไว้ — cache เป็นการจับคู่
@@ -97,13 +101,26 @@ class ThaiBrain:
         ]
 
     def build_messages(
-        self, speaker: Speaker | None, user_text: str, extra_history: Sequence[Turn] = ()
+        self,
+        speaker: Speaker | None,
+        user_text: str,
+        extra_history: Sequence[Turn] | None = None,
     ) -> list[dict]:
-        history: list[Turn] = list(extra_history)
-        if speaker is not None and not history:
-            history = self.store.recent_turns(
-                speaker.id, limit=self.settings.history_turns
+        """ประกอบรายการข้อความที่จะส่งให้โมเดล
+
+        ``extra_history`` เป็น ``None`` แปลว่า "ไปโหลดเอง" ส่วนลิสต์ว่างแปลว่า
+        "ไม่มีประวัติจริง ๆ" ต้องแยกสองกรณีนี้ ไม่งั้นผู้เรียกที่ตั้งใจส่งประวัติว่าง
+        จะได้ประวัติที่โหลดเองซ้อนมา ซึ่งรวมถึงเทิร์นที่เพิ่งบันทึกไปเมื่อครู่
+        ทำให้ข้อความล่าสุดถูกส่งซ้ำสองครั้ง
+        """
+        if extra_history is None:
+            history: list[Turn] = (
+                self.store.recent_turns(speaker.id, limit=self.settings.history_turns)
+                if speaker is not None
+                else []
             )
+        else:
+            history = list(extra_history)
 
         messages: list[dict] = [
             {"role": t.role, "content": t.content} for t in history if t.content.strip()
@@ -121,7 +138,7 @@ class ThaiBrain:
         speaker: Speaker | None = None,
         *,
         voice_enabled: bool = True,
-        history: Sequence[Turn] = (),
+        history: Sequence[Turn] | None = None,
     ) -> Iterator[BrainEvent]:
         """สตรีมคำตอบออกมาเป็น BrainEvent
 
@@ -188,7 +205,7 @@ class ThaiBrain:
         speaker: Speaker | None = None,
         *,
         voice_enabled: bool = True,
-        history: Sequence[Turn] = (),
+        history: Sequence[Turn] | None = None,
     ) -> str:
         """เวอร์ชันไม่สตรีม — สะดวกสำหรับเทสต์และ API แบบ request/response"""
         text = ""

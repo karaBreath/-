@@ -1,9 +1,12 @@
 """ทดสอบยูทิลิตี้ภาษาไทย — ส่วนที่กฎภาษาไทยอยู่ตรงนี้ทั้งหมด"""
 
+import pytest
+
 from thaivoice.thai_text import (
     SpeechChunker,
     clean_for_speech,
     detect_particle,
+    expand_numbers_for_speech,
     normalize_transcript,
     particle_for_gender,
     read_digits,
@@ -32,7 +35,8 @@ class TestCleanForSpeech:
     def test_แปลงหน่วยและเลขไทย(self):
         assert "เปอร์เซ็นต์" in clean_for_speech("50%")
         assert "กิโลเมตร" in clean_for_speech("ระยะ 5 km")
-        assert clean_for_speech("๑๒๓") == "123"
+        assert clean_for_speech("๑๒๓") == "หนึ่งร้อยยี่สิบสาม"
+        assert clean_for_speech("๑๒๓", expand_numbers=False) == "123"
 
     def test_ตัดอิโมจิออก(self):
         assert clean_for_speech("ดีใจจัง 😀🎉") == "ดีใจจัง"
@@ -58,7 +62,8 @@ class TestNumbers:
     def test_หลักใหญ่(self):
         assert thai_number_to_words(2568) == "สองพันห้าร้อยหกสิบแปด"
         assert thai_number_to_words(1_000_000) == "หนึ่งล้าน"
-        assert thai_number_to_words(1_000_001) == "หนึ่งล้านหนึ่ง"
+        # กฎ เอ็ด ต้องข้ามการเรียกซ้ำของหลักล้านไปด้วย
+        assert thai_number_to_words(1_000_001) == "หนึ่งล้านเอ็ด"
 
     def test_เลขติดลบ(self):
         assert thai_number_to_words(-5) == "ลบห้า"
@@ -225,3 +230,195 @@ class TestSegmenterEngine:
         assert thai_text.thai_segmenter_engine(force_probe=True) is None
         # ยังต้องตัดประโยคได้ด้วยกฎสำรอง
         assert thai_text.split_sentences("สวัสดีครับ ผมชื่อโบทนะครับ")
+
+
+class TestTranscriptKeepsNumbers:
+    """ตัวจับคำซ้ำของ ASR เคยกินตัวเลขซ้ำในก้อนเดียวกัน ทำลายข้อมูลผู้ใช้
+
+    เดิมใช้ ``(\\S+?)(?:\\s*\\1){2,}`` ซึ่งจับได้แม้แต่ตัวอักษรเดียวและไม่ต้องมี
+    ช่องว่างคั่น ผลคือเบอร์โทร ราคา และปี พังทุกครั้งที่ผู้ใช้พูด
+    """
+
+    @pytest.mark.parametrize(
+        "spoken",
+        [
+            "เบอร์ผม 0811111111 ครับ",
+            "โทร 0899999999",
+            "ราคา 1000 บาท",
+            "ปี 2222",
+            "ห้อง 555",
+            "เลขที่ 11111",
+            "บัญชี 1234567890",
+        ],
+    )
+    def test_ตัวเลขต้องไม่ถูกแตะ(self, spoken):
+        assert normalize_transcript(spoken) == spoken
+
+    def test_ยังยุบคำซ้ำที่ASRหลอนได้อยู่(self):
+        assert normalize_transcript("ขอบคุณ ขอบคุณ ขอบคุณ ขอบคุณ") == "ขอบคุณ"
+        assert normalize_transcript("สวัสดี สวัสดี สวัสดี ครับ") == "สวัสดี ครับ"
+
+    def test_คำซ้ำสองครั้งไม่ถือว่าหลอน(self):
+        # พูดซ้ำสองครั้งเป็นเรื่องปกติของภาษาพูด
+        assert normalize_transcript("ไม่ ไม่") == "ไม่ ไม่"
+
+
+class TestParticleCollisions:
+    """คำลงท้ายไทยพ้องกับคำธรรมดาเยอะมาก จึงต้องดูเฉพาะท้ายประโยค"""
+
+    @pytest.mark.parametrize(
+        "spoken",
+        [
+            "ค่าไฟเดือนนี้แพงมากเลย",   # ค่า = ค่าใช้จ่าย
+            "คะแนนสอบออกหรือยัง",       # คะ ใน คะแนน
+            "เสื้อตัวนี้คับไปหน่อย",      # คับ = แน่น
+            "ผมมีอาการปวดขา",           # ขา = อวัยวะ
+            "ขายของออนไลน์",            # ขา ใน ขาย
+            "เสื้อสีขาวสวยดี",           # ขา ใน ขาว
+            "วันนี้อากาศดี",
+        ],
+    )
+    def test_ไม่เดาเพศจากคำที่พ้องกัน(self, spoken):
+        assert detect_particle(spoken) is None
+
+    @pytest.mark.parametrize(
+        "spoken,expected",
+        [
+            ("ผมชื่อสมชายครับ", "male"),
+            ("ผมชื่อสมชายครับผม", "male"),
+            ("หนูชื่อแนนค่ะ", "female"),
+            ("ขอบคุณค่า", "female"),
+            ("ไปไหนมาคะ", "female"),
+            ("ได้เลยครับ.", "male"),
+        ],
+    )
+    def test_คำลงท้ายท้ายประโยคยังจับได้(self, spoken, expected):
+        assert detect_particle(spoken) == expected
+
+    def test_คำลงท้ายที่เป็นการยกคำพูดคนอื่นต้องไม่นับ(self):
+        assert detect_particle("เขาพูดว่าค่ะ") is None
+        assert detect_particle("เมื่อกี้เขาบอกว่าครับ") is None
+
+    def test_จ้ะจ๊ะไม่บอกเพศ(self):
+        # จ้ะ/จ๊ะ/จ้า ใช้ได้ทั้งสองเพศ การเดาเพศจากคำพวกนี้ผิดบ่อยกว่าถูก
+        assert detect_particle("ไปไหนจ๊ะ") is None
+        assert detect_particle("ขอบคุณจ้า") is None
+
+
+class TestNumberEdRule:
+    """กฎ หนึ่ง -> เอ็ด ต้องข้ามการเรียกซ้ำของหลักล้านไปด้วย"""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (1_000_001, "หนึ่งล้านเอ็ด"),
+            (2_000_001, "สองล้านเอ็ด"),
+            (10_000_001, "สิบล้านเอ็ด"),
+            (21_000_001, "ยี่สิบเอ็ดล้านเอ็ด"),
+            (1_000_000_001, "หนึ่งพันล้านเอ็ด"),
+            (1_000_011, "หนึ่งล้านสิบเอ็ด"),
+            (1_100_000, "หนึ่งล้านหนึ่งแสน"),
+            (1_000_000, "หนึ่งล้าน"),
+            (21_000_000, "ยี่สิบเอ็ดล้าน"),
+        ],
+    )
+    def test_คำอ่านหลักล้าน(self, value, expected):
+        assert thai_number_to_words(value) == expected
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (100, "หนึ่งร้อย"),
+            (101, "หนึ่งร้อยเอ็ด"),
+            (110, "หนึ่งร้อยสิบ"),
+            (111, "หนึ่งร้อยสิบเอ็ด"),
+            (120, "หนึ่งร้อยยี่สิบ"),
+            (121, "หนึ่งร้อยยี่สิบเอ็ด"),
+            (1001, "หนึ่งพันเอ็ด"),
+            (1010, "หนึ่งพันสิบ"),
+            (1100, "หนึ่งพันหนึ่งร้อย"),
+            (10000, "หนึ่งหมื่น"),
+            (100000, "หนึ่งแสน"),
+        ],
+    )
+    def test_คำอ่านหลักรองลงมา(self, value, expected):
+        assert thai_number_to_words(value) == expected
+
+
+class TestNumberExpansion:
+    def test_อ่านจำนวนเป็นคำ(self):
+        assert expand_numbers_for_speech("ราคา 199 บาท") == "ราคา หนึ่งร้อยเก้าสิบเก้า บาท"
+        assert "สามสิบหก" in expand_numbers_for_speech("อุณหภูมิ 36 องศา")
+
+    def test_เบอร์โทรอ่านทีละตัว(self):
+        spoken = expand_numbers_for_speech("โทร 0812345678")
+        assert "ศูนย์ แปด หนึ่ง" in spoken
+        assert "แปดร้อย" not in spoken
+
+    def test_เลขยาวอ่านทีละตัว(self):
+        assert "หนึ่ง สอง สาม" in expand_numbers_for_speech("บัญชี 12345678")
+
+    def test_ไม่แตะเวลาและ_IP(self):
+        assert expand_numbers_for_speech("นัดกัน 20:30 นะ") == "นัดกัน 20:30 นะ"
+        assert expand_numbers_for_speech("ไอพี 192.168.1.1") == "ไอพี 192.168.1.1"
+
+    def test_ไม่แตะเลขที่ติดกับตัวอักษร(self):
+        assert expand_numbers_for_speech("รุ่น A4 ครับ") == "รุ่น A4 ครับ"
+
+    def test_ทศนิยม(self):
+        assert "จุด" in expand_numbers_for_speech("3.5 กิโล")
+
+
+class TestUnitBoundaries:
+    """หน่วยภาษาอังกฤษต้องเทียบแบบมีขอบเขตคำ ไม่งั้นไปกินตัวอักษรกลางคำ"""
+
+    @pytest.mark.parametrize(
+        "text",
+        ["เปิดบัญชี KBank ได้ที่สาขา", "ผมสอบ MBTI ได้ INFP", "ชุมชน LGBT"],
+    )
+    def test_ไม่แปลงตัวย่อกลางคำ(self, text):
+        spoken = clean_for_speech(text)
+        assert "กิโลไบต์" not in spoken
+        assert "เมกะไบต์" not in spoken
+        assert "กิกะไบต์" not in spoken
+
+    def test_ยังแปลงหน่วยที่ยืนเดี่ยว(self):
+        assert "กิโลเมตร" in clean_for_speech("ระยะ 5 km")
+        assert "กิกะไบต์" in clean_for_speech("ไฟล์ 5 GB")
+
+    def test_องศาเซลเซียสต้องไม่หายไปกับตัวกรองสัญลักษณ์(self):
+        # ° เป็นอักขระหมวด So ถ้ากรองทิ้งก่อนแปลงหน่วย จะเหลือแค่ C ลอย ๆ
+        spoken = clean_for_speech("อุณหภูมิ 25°C ครับ")
+        assert "องศาเซลเซียส" in spoken
+        assert "C" not in spoken
+
+
+class TestChunkerDoesNotBreakWords:
+    def test_ไม่ตัดกลางคลัสเตอร์อักขระไทย(self):
+        """ตัดคั่นวรรณยุกต์จะเหลือเครื่องหมายลอย ๆ ที่ TTS อ่านเป็นพยางค์ประหลาด"""
+        import unicodedata
+
+        source = "ผมขออธิบายแบบนี้นะครับการที่เราจะทำให้ระบบเสียงตอบสนองได้เร็วนั้นต้องเริ่มพูดตั้งแต่ประโยคแรกไม่ต้องรอให้โมเดลเขียนคำตอบจนจบ"
+        chunker = SpeechChunker(min_chars=20, max_chars=60)
+        chunks = list(chunker.feed(source)) + list(chunker.flush())
+
+        assert len(chunks) > 1, "ข้อความยาวขนาดนี้ต้องถูกตัด"
+        for chunk in chunks:
+            assert unicodedata.category(chunk[0]) != "Mn", (
+                f"ท่อนขึ้นต้นด้วยวรรณยุกต์ลอย: {chunk[:10]!r}"
+            )
+            assert chunk[-1] not in "เแโใไ", f"ท่อนจบด้วยสระหน้าที่ไม่มีพยัญชนะ: {chunk[-10:]!r}"
+        assert "".join(chunks).replace(" ", "") == source
+
+    def test_ขึ้นบรรทัดใหม่ตัดได้แม้ท่อนสั้น(self):
+        chunker = SpeechChunker(min_chars=24)
+        chunks = list(chunker.feed("สั้นมาก\nบรรทัดถัดไปที่ยาวกว่ามากพอสมควรเลยนะครับ "))
+        assert chunks[0] == "สั้นมาก"
+        for chunk in chunks:
+            assert "\n" not in chunk
+
+
+def test_ท่อนสุดท้ายที่สั้นถูกรวมกับท่อนก่อนหน้า():
+    # ไม่งั้น "ครับ" จะถูกพูดเดี่ยว ๆ ห้อยท้าย
+    parts = split_sentences("วันนี้อากาศดีมากเลยนะ ครับ")
+    assert parts[-1] != "ครับ"

@@ -5,6 +5,7 @@
 1. **ระบุตัวผู้พูด** จากลายเสียง ถ้าไม่รู้จักก็ดูว่าเขาบอกชื่อมาไหม
 2. **ตรวจคำสั่งเกี่ยวกับความจำ** เช่น "ลืมทุกอย่างเกี่ยวกับฉัน" — จัดการตรง ๆ
    ไม่ผ่านโมเดล เพราะการลบข้อมูลส่วนบุคคลต้องเชื่อถือได้ 100 เปอร์เซ็นต์
+   และต้องผ่านการยืนยันหนึ่งครั้งเสมอ
 3. **สตรีมคำตอบ** จาก Claude พร้อมความจำของคนคนนั้น
 4. **พูดออกมาทีละประโยค** ทันทีที่ประโยคจบ ไม่รอคำตอบครบก้อน
 5. **บันทึกบทสนทนา** และสั่งสกัดความจำเบื้องหลัง
@@ -16,12 +17,12 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Sequence
 
-from .brain import BrainEvent, ThaiBrain
+from .brain import ThaiBrain
 from .config import Settings, get_settings
 from .extraction import MemoryExtractor
-from .memory import MemoryStore, Speaker
+from .memory import MemoryStore, Speaker, Turn
 from .speaker import Identification, SpeakerIdentifier
 from .thai_text import detect_particle, particle_for_gender
 from .tts import Speech, TextToSpeech
@@ -33,26 +34,92 @@ __all__ = [
     "SessionEvent",
     "ExchangeResult",
     "detect_forget_all",
+    "is_affirmative",
 ]
 
-# คำสั่งลบความจำ — จัดการด้วยกฎ ไม่ปล่อยให้โมเดลตัดสิน
-_FORGET_ALL = re.compile(
-    r"(ลืม(ทุกอย่าง|ทุกเรื่อง|ฉัน|ผม|หนู|เรา)|ลบ(ความจำ|ข้อมูล|ประวัติ)"
-    r"|เคลียร์(ความจำ|ข้อมูล)|forget everything|delete my data)"
+# ── ตรวจจับคำสั่งลบความจำ ───────────────────────────────────────────────────
+#
+# การลบข้อมูลส่วนบุคคลผิดพลาดเสียหายกว่าการไม่ลบมาก จึงต้องเข้มงวดสองชั้น:
+# ชั้นแรกคือรูปประโยคต้องเป็นคำสั่งลบ "ความจำ" จริง ๆ ไม่ใช่แค่มีคำว่า ลืม/ลบ
+# ชั้นที่สองคือต้องยืนยันอีกครั้งก่อนลบจริง (ดู ConversationSession)
+#
+# ของเดิมจับแค่คำว่า "ลืมฉัน" ทำให้ประโยคอย่าง "อย่าลืมฉันนะ" (คำบอกรักทั่วไป)
+# และ "ไม่ต้องลบความจำนะ" (สั่งห้ามลบ!) ลบความจำทั้งหมดทันที
+_SELF = r"(?:ฉัน|ผม|หนู|เรา|ดิฉัน|กระผม)"
+_FORGET_VERB = r"(?:ลืม|ลบ|ล้าง|เคลียร์)"
+_MEMORY_OBJECT = (
+    r"(?:ความจำ"
+    rf"|ข้อมูล(?:ของ)?{_SELF}"
+    rf"|(?:ทุกอย่าง|ทุกเรื่อง)(?:ที่รู้)?เกี่ยวกับ{_SELF}"
+    rf"|ที่รู้เกี่ยวกับ{_SELF}"
+    r"|ประวัติการ(?:คุย|สนทนา)"
+    r")"
 )
+_FORGET_INTENT = re.compile(_FORGET_VERB + r".{0,10}?" + _MEMORY_OBJECT)
+_FORGET_EN = re.compile(
+    r"\b(?:forget everything|delete my (?:data|memory)|erase my (?:data|memory))\b",
+    re.IGNORECASE,
+)
+# คำห้าม/คำปฏิเสธที่อยู่ "ก่อน" คำกริยา แปลว่าผู้ใช้สั่งไม่ให้ลบ
+_NEGATOR_BEFORE = re.compile(r"(?:อย่าเพิ่ง|อย่า|ไม่ต้อง|ห้าม|ยังไม่)\s*$")
+# ประโยคคำถามไม่ใช่คำสั่ง — "ลบข้อมูลยังไง" คือขอวิธี ไม่ใช่ขอให้ลบ
+_QUESTION_MARKER = re.compile(r"(?:ยังไง|อย่างไร|วิธี|ไหม|มั้ย|หรือเปล่า|เหรอ|ทำไม)")
+# "ผมลืม..." คือผู้พูดลืมเอง ไม่ใช่สั่งให้ระบบลืม
+_FIRST_PERSON_FORGOT = re.compile(_SELF + r"\s*(?:ก็|เลย)?\s*ลืม")
 
-_CONFIRM_FORGET = "ลบความจำเกี่ยวกับคุณทั้งหมดแล้ว{particle} เริ่มรู้จักกันใหม่ได้เลย{particle}"
+# หมายเหตุ: ห้ามใช้ \b กับคำไทย เพราะคำไทยจำนวนมากลงท้ายด้วยวรรณยุกต์ (เช่น "ใช่"
+# "ไม่") ซึ่งเป็นอักขระผสมที่ Python ไม่นับเป็น word character ทำให้ \b ไม่ match
+# จึงใช้การยึดต้นข้อความแทน
+_AFFIRMATIVE = re.compile(
+    r"^\s*(?:ใช่|ยืนยัน|ลบเลย|ลบ|เอาเลย|เอาสิ|เอา|ตกลง|โอเค|โอเก|จัดไป)"
+    r"|^\s*(?:yes|yeah|yep|y|ok|okay|confirm|sure)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE = re.compile(
+    r"^\s*(?:ไม่|อย่า|ยกเลิก|พอ|หยุด|เดี๋ยวก่อน|ยัง)"
+    r"|^\s*(?:no|nope|cancel|stop|wait)\b",
+    re.IGNORECASE,
+)
 
 
 def detect_forget_all(text: str) -> bool:
-    """ตรวจว่าผู้ใช้สั่งให้ลืมทุกอย่างหรือไม่
+    """ตรวจว่าผู้ใช้ *สั่ง* ให้ลบความจำทั้งหมดหรือไม่
+
+    ตั้งใจให้เข้มงวด — พลาดดีกว่าลบข้อมูลของคนอื่นทิ้งโดยไม่ได้ตั้งใจ
 
     >>> detect_forget_all("ลืมทุกอย่างเกี่ยวกับฉันหน่อย")
     True
-    >>> detect_forget_all("วันนี้กินอะไรดี")
+    >>> detect_forget_all("อย่าลืมฉันนะ")
+    False
+    >>> detect_forget_all("ไม่ต้องลบความจำนะ")
+    False
+    >>> detect_forget_all("ลบข้อมูลในมือถือยังไง")
     False
     """
-    return bool(_FORGET_ALL.search(text or ""))
+    if not text:
+        return False
+    if _QUESTION_MARKER.search(text):
+        return False
+    if _FIRST_PERSON_FORGOT.search(text):
+        return False
+
+    match = _FORGET_INTENT.search(text) or _FORGET_EN.search(text)
+    if match is None:
+        return False
+    if _NEGATOR_BEFORE.search(text[: match.start()]):
+        return False
+    return True
+
+
+def is_affirmative(text: str) -> bool | None:
+    """ตอบรับ (``True``) ตอบปฏิเสธ (``False``) หรือไม่ใช่ทั้งสองอย่าง (``None``)"""
+    if not text:
+        return None
+    if _NEGATIVE.search(text):
+        return False
+    if _AFFIRMATIVE.search(text):
+        return True
+    return None
 
 
 @dataclass
@@ -82,7 +149,17 @@ class ExchangeResult:
 
 
 class ConversationSession:
-    """หนึ่งบทสนทนา — ใช้ซ้ำได้หลายเทิร์นและหลายคนสลับกันพูด"""
+    """หนึ่งบทสนทนา — ใช้ซ้ำได้หลายเทิร์นและหลายคนสลับกันพูด
+
+    ``sticky_speaker`` บอกว่าเมื่อระบุตัวผู้พูดไม่ได้ (เช่นมีแต่ข้อความ ไม่มีเสียง)
+    ควรถือว่ายังเป็นคนเดิมของบทสนทนานี้หรือไม่
+
+    * ``True``  — เหมาะกับแอปที่มีผู้ใช้คนเดียวต่อหนึ่ง session เช่นโหมด CLI
+      หรือหน้าเว็บที่เปิดในเครื่องของเจ้าตัว
+    * ``False`` — **จำเป็นสำหรับเซิร์ฟเวอร์ที่ใช้ session ร่วมกัน** ไม่งั้นคำขอของ
+      คนที่สองซึ่งไม่ได้ระบุตัวตนจะสวมรอยเป็นคนแรก และจะได้เห็นความจำของคนแรก
+      ทั้งหมด รวมถึงลบความจำของคนแรกได้ด้วย
+    """
 
     def __init__(
         self,
@@ -93,6 +170,7 @@ class ConversationSession:
         tts: TextToSpeech | None = None,
         settings: Settings | None = None,
         session_id: str | None = None,
+        sticky_speaker: bool = True,
     ) -> None:
         self.store = store
         self.brain = brain
@@ -101,24 +179,29 @@ class ConversationSession:
         self.tts = tts
         self.settings = settings or get_settings()
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        self.sticky_speaker = sticky_speaker
         self.current_speaker: Speaker | None = None
+        # id ของคนที่ขอลบความจำและกำลังรอการยืนยัน
+        self._pending_forget: int | None = None
 
     # ── ระบุตัวผู้พูด ───────────────────────────────────────────────────
-    def identify(self, transcript: str, pcm: bytes | None) -> Identification:
-        """หาว่าใครพูดประโยคนี้ และอัปเดตคำลงท้ายที่ควรใช้กับเขา"""
-        ident = self.identifier.resolve(
-            pcm, self.settings.sample_rate, transcript
-        )
+    def identify(
+        self, transcript: str, pcm: bytes | None, sample_rate: int | None = None
+    ) -> Identification:
+        """หาว่าใครพูดประโยคนี้ และอัปเดตคำลงท้ายที่คนนั้นใช้"""
+        rate = sample_rate or self.settings.sample_rate
+        ident = self.identifier.resolve(pcm, rate, transcript)
 
-        if ident.speaker is None and self.current_speaker is not None and pcm is None:
+        if ident.speaker is None and pcm is None and self.sticky_speaker:
             # ไม่มีเสียงให้เทียบ (เช่นพิมพ์เข้ามา) — ถือว่ายังเป็นคนเดิมในบทสนทนานี้
-            ident = Identification(
-                speaker=self.current_speaker, method="fallback", score=0.0
-            )
+            # ทำได้เฉพาะเมื่อ session นี้เป็นของคนเดียวเท่านั้น
+            remembered = self._live_current_speaker()
+            if remembered is not None:
+                ident = Identification(speaker=remembered, method="fallback", score=0.0)
 
         speaker = ident.speaker
         if speaker is not None:
-            # ผู้ใช้เผยเพศจากคำลงท้ายเมื่อไหร่ ก็ปรับคำลงท้ายของบอทตามทันที
+            # ผู้ใช้เผยเพศจากคำลงท้ายเมื่อไหร่ ก็บันทึกไว้ใช้เรียกขานให้ถูก
             gender = detect_particle(transcript)
             if gender and not speaker.gender:
                 updated = self.store.update_speaker(
@@ -130,19 +213,36 @@ class ConversationSession:
 
             # เจอเสียงตรงกับคนเดิม -> เสริมลายเสียงให้แม่นขึ้นเรื่อย ๆ
             if pcm and ident.method == "voice" and ident.confident:
-                self.identifier.enroll(speaker, pcm, self.settings.sample_rate)
+                self.identifier.enroll(speaker, pcm, rate)
         return ident
 
+    def _live_current_speaker(self) -> Speaker | None:
+        """คนปัจจุบันที่ยัง *มีอยู่จริง* ในฐานข้อมูล
+
+        ถ้าคนคนนั้นถูกลบไปแล้ว (เช่นผู้ใช้กดลบตัวเองแล้วคุยต่อ) การใช้ค่าเก่าค้าง
+        จะทำให้บันทึกบทสนทนาชนกับ foreign key แล้วโยน error ออกไปเป็น 500
+        """
+        if self.current_speaker is None:
+            return None
+        if not self.store.speaker_exists(self.current_speaker.id):
+            log.info("ผู้สนทนา %s ถูกลบไปแล้ว ล้างสถานะ", self.current_speaker.id)
+            self.current_speaker = None
+            self._pending_forget = None
+        return self.current_speaker
+
     def register_speaker(
-        self, name: str, pcm: bytes | None = None, gender: str | None = None
+        self,
+        name: str,
+        pcm: bytes | None = None,
+        gender: str | None = None,
+        sample_rate: int | None = None,
     ) -> Speaker:
         """ลงทะเบียนคนใหม่ด้วยตนเอง แล้วผูกลายเสียงถ้ามีเสียงตัวอย่าง"""
-        existing = self.store.find_speaker_by_name(name)
-        speaker = existing or self.store.create_speaker(
+        speaker, _created = self.store.get_or_create_speaker(
             name, gender=gender, particle=particle_for_gender(gender)
         )
         if pcm:
-            self.identifier.enroll(speaker, pcm, self.settings.sample_rate)
+            self.identifier.enroll(speaker, pcm, sample_rate or self.settings.sample_rate)
         self.current_speaker = speaker
         return speaker
 
@@ -153,6 +253,7 @@ class ConversationSession:
         pcm: bytes | None = None,
         speaker: Speaker | None = None,
         speak: bool = True,
+        sample_rate: int | None = None,
     ) -> Iterator[SessionEvent]:
         """ประมวลผลหนึ่งเทิร์นแบบสตรีม"""
         transcript = transcript.strip()
@@ -163,33 +264,42 @@ class ConversationSession:
             self.current_speaker = speaker
             ident = Identification(speaker=speaker, method="fallback")
         else:
-            ident = self.identify(transcript, pcm)
+            ident = self.identify(transcript, pcm, sample_rate)
             speaker = ident.speaker
 
         yield SessionEvent("speaker", speaker=speaker, identification=ident)
 
         # คำสั่งลบความจำ — ทำเองไม่ผ่านโมเดล เพื่อให้มั่นใจว่าลบจริง
-        if speaker is not None and detect_forget_all(transcript):
-            yield from self._handle_forget(speaker, transcript, speak)
+        handled = self._handle_memory_command(transcript, speaker, speak)
+        if handled is not None:
+            yield from handled
             return
 
+        # ต้องอ่านประวัติ *ก่อน* บันทึกเทิร์นล่าสุด ไม่งั้นข้อความเดียวกันจะถูกส่ง
+        # ให้โมเดลสองครั้ง (ครั้งหนึ่งจากประวัติ อีกครั้งจากข้อความปัจจุบัน)
+        history: Sequence[Turn] = (
+            self.store.recent_turns(speaker.id, limit=self.settings.history_turns)
+            if speaker is not None
+            else []
+        )
         if speaker is not None:
             self.store.record_turn(speaker.id, self.session_id, "user", transcript)
 
         reply = ""
-        chunks: list[str] = []
         for event in self.brain.stream(
-            transcript, speaker, voice_enabled=self.identifier.enabled
+            transcript,
+            speaker,
+            voice_enabled=self.identifier.enabled,
+            history=history,
         ):
             if event.type == "delta":
                 yield SessionEvent("delta", text=event.text, speaker=speaker)
             elif event.type == "chunk":
-                chunks.append(event.text)
                 yield SessionEvent(
                     "chunk",
                     text=event.text,
                     speaker=speaker,
-                    speech=self._speak(event.text, speaker) if speak else None,
+                    speech=self._speak(event.text) if speak else None,
                 )
             elif event.type == "done":
                 reply = event.text
@@ -207,10 +317,13 @@ class ConversationSession:
         speaker: Speaker | None = None,
         speak: bool = True,
         on_event: Callable[[SessionEvent], None] | None = None,
+        sample_rate: int | None = None,
     ) -> ExchangeResult:
         """ประมวลผลหนึ่งเทิร์นแบบรอผลลัพธ์ครบ"""
         result = ExchangeResult(transcript=transcript, reply="")
-        for event in self.stream_exchange(transcript, pcm, speaker, speak):
+        for event in self.stream_exchange(
+            transcript, pcm, speaker, speak, sample_rate=sample_rate
+        ):
             if on_event:
                 on_event(event)
             if event.type == "speaker":
@@ -223,25 +336,76 @@ class ConversationSession:
                 result.speaker = event.speaker
         return result
 
-    # ── ภายใน ───────────────────────────────────────────────────────────
-    def _handle_forget(
-        self, speaker: Speaker, transcript: str, speak: bool
-    ) -> Iterator[SessionEvent]:
-        removed = self.store.forget_all_facts(speaker.id)
-        log.info("ลบความจำ %d รายการของ speaker %s", removed, speaker.id)
-        particle = speaker.particle or "ครับ"
-        reply = _CONFIRM_FORGET.format(particle=particle)
-        self.store.record_turn(speaker.id, self.session_id, "user", transcript)
-        self.store.record_turn(speaker.id, self.session_id, "assistant", reply)
-        yield SessionEvent(
-            "chunk",
-            text=reply,
-            speaker=speaker,
-            speech=self._speak(reply, speaker) if speak else None,
-        )
-        yield SessionEvent("done", text=reply, speaker=speaker)
+    # ── คำสั่งเกี่ยวกับความจำ ───────────────────────────────────────────
+    def _handle_memory_command(
+        self, transcript: str, speaker: Speaker | None, speak: bool
+    ) -> Iterator[SessionEvent] | None:
+        """จัดการคำสั่งลบความจำ คืน ``None`` ถ้าไม่ใช่คำสั่งประเภทนี้"""
+        particle = self.settings.assistant_particle
 
-    def _speak(self, text: str, speaker: Speaker | None) -> Speech | None:
+        # กำลังรอยืนยันอยู่
+        if self._pending_forget is not None:
+            pending_id = self._pending_forget
+            answer = is_affirmative(transcript)
+            if answer is True and speaker is not None and speaker.id == pending_id:
+                self._pending_forget = None
+                removed = self.store.forget_everything(speaker.id)
+                log.info("ลบความจำของ speaker %s: %s", speaker.id, removed)
+                total = sum(removed.values())
+                return self._say(
+                    f"ลบความจำทั้งหมดแล้ว{particle} "
+                    f"ลบไป {total} รายการ ทั้งสิ่งที่จำไว้ บทสรุป และบทสนทนาเก่า "
+                    f"เริ่มรู้จักกันใหม่ได้เลย{particle}",
+                    speaker,
+                    speak,
+                )
+            self._pending_forget = None
+            if answer is False:
+                return self._say(f"ได้{particle} ไม่ลบให้{particle}", speaker, speak)
+            # ตอบเป็นอย่างอื่น -> ถือว่าไม่ยืนยัน แล้วคุยต่อตามปกติ
+            return None
+
+        if not detect_forget_all(transcript):
+            return None
+
+        if speaker is None:
+            # ตอบตามจริง ดีกว่ารับปากแล้วไม่ได้ลบอะไรเลย
+            return self._say(
+                f"ตอนนี้ยังไม่รู้ว่าคุยอยู่กับใคร เลยยังไม่มีความจำอะไรเก็บไว้{particle} "
+                f"ไม่มีอะไรต้องลบ{particle}",
+                None,
+                speak,
+            )
+
+        self._pending_forget = speaker.id
+        stats = self.store.stats(speaker.id)
+        return self._say(
+            f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับคุณ{speaker.call_name}ทั้งหมด "
+            f"ทั้งสิ่งที่จำไว้ {stats.facts} เรื่อง และบทสนทนา {stats.turns} เทิร์น "
+            f"ลบแล้วเอากลับไม่ได้ ถ้าแน่ใจให้พูดว่า ยืนยัน{particle}",
+            speaker,
+            speak,
+        )
+
+    def _say(
+        self, text: str, speaker: Speaker | None, speak: bool
+    ) -> Iterator[SessionEvent]:
+        """ตอบข้อความที่ระบบเขียนเอง (ไม่ผ่านโมเดล) และบันทึกลงบทสนทนา"""
+
+        def generate() -> Iterator[SessionEvent]:
+            if speaker is not None and self.store.speaker_exists(speaker.id):
+                self.store.record_turn(speaker.id, self.session_id, "assistant", text)
+            yield SessionEvent(
+                "chunk",
+                text=text,
+                speaker=speaker,
+                speech=self._speak(text) if speak else None,
+            )
+            yield SessionEvent("done", text=text, speaker=speaker)
+
+        return generate()
+
+    def _speak(self, text: str) -> Speech | None:
         if self.tts is None or not text.strip():
             return None
         try:
