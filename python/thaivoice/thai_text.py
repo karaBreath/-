@@ -324,9 +324,12 @@ _TIME_DOT = re.compile(r"(?<![\w.:])([01]?\d|2[0-3])\.([0-5]\d)\s*น\.")
 # คนไทยเขียนเวลาแบบจุดโดยไม่มี "น." บ่อยมาก ("เจอกัน 19.00", "นัดตอน 8.30")
 # แต่ "3.50 เมตร" ก็หน้าตาเหมือนกันเป๊ะ จึงต้องดูคำแวดล้อมประกอบ
 _TIME_DOT_BARE = re.compile(r"(?<![\w.:])([01]?\d|2[0-3])\.([0-5]\d)(?![\d\w])(?!\.\d)")
+#
+# ตั้งใจ *ไม่* ใส่ "ประมาณ" "ราว" "ถึง" "ก่อน" "หลัง" เพราะมันใช้กับปริมาณอะไรก็ได้
+# "สูงประมาณ 3.50 เมตร" เคยถูกอ่านเป็น "สามนาฬิกาห้าสิบนาที เมตร"
 _TIME_CONTEXT = re.compile(
-    r"(?:เวลา|ตอน|นัด|เจอกัน|ประชุม|เริ่ม|เลิก|ถึง|ออก|บ่าย|เช้า|เย็น|ค่ำ|เที่ยง|"
-    r"ดึก|โมง|ทุ่ม|ตี|ก่อน|หลัง|ราว|ประมาณ)"
+    r"(?:เวลา|ตอน|นัด|เจอกัน|ประชุม|เริ่ม|เลิก|ออก|บ่าย|เช้า|เย็น|ค่ำ|เที่ยง|"
+    r"ดึก|โมง|ทุ่ม|ตี)"
 )
 
 # เบอร์โทรที่คั่นด้วยขีดหรือช่องว่าง (081-234-5678, 02 123 4567, +66 81 234 5678)
@@ -343,17 +346,28 @@ _THAI_MONTHS = (
 
 # ช่วงตัวเลขและสกอร์ — ขีดกลางอ่านออกเสียงไม่ได้ TTS จะกลืนหายไปเฉย ๆ
 # ทำให้ "3-5 คน" ฟังเป็น "สามห้าคน" ซึ่งความหมายเปลี่ยน
-_NUMBER_RANGE = re.compile(r"(?<![\w-])(\d{1,4})\s*-\s*(\d{1,4})(?![\d\w-])")
-_SCORE_CONTEXT = re.compile(r"(?:คะแนน|สกอร์|ผล|ชนะ|แพ้|เสมอ|นำ|ตาม)")
+# ต้องรับรูปที่มีจุลภาคด้วย ("1,200-1,500 บาท") ไม่งั้นจะเหลือขีดกลางค้างอยู่
+# ระหว่างคำอ่านสองก้อน ซึ่ง TTS กลืนหายไปเฉย ๆ
+_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|\d{1,4})"
+_NUMBER_RANGE = re.compile(
+    rf"(?<![\w.,-])({_RANGE_TOKEN})\s*-\s*({_RANGE_TOKEN})(?![\d\w,-])"
+)
+_SCORE_CONTEXT = re.compile(
+    r"(?:คะแนน|สกอร์|ผลบอล|ผลการแข่ง|ผลแข่ง|ชนะ|แพ้|เสมอ)"
+)
 
 # เลขที่มีเครื่องหมายทับแต่ไม่ใช่วันที่ เช่นบ้านเลขที่ 99/1
 _SLASH_PAIR = re.compile(r"(?<![\w/])(\d{1,5})/(\d{1,4})(?![\d\w/])")
 
 # เลขรหัสที่มีคำบอกบริบทนำหน้า — คนไทยอ่านทีละตัว ไม่อ่านเป็นจำนวน
 # ("ห้อง 2105" คือ "ห้องสองหนึ่งศูนย์ห้า" ไม่ใช่ "ห้องสองพันหนึ่งร้อยห้า")
+# ห้าม (?<![\w]) นำหน้า — ภาษาไทยเขียนติดกันไม่มีช่องว่าง "ไปห้อง 2105" จึงมี
+# "ป" อยู่หน้า "ห้อง" ซึ่งเป็น \w ทำให้กฎนี้แทบไม่เคยทำงานเลย
+# ต้องไม่กินเลขที่ตามด้วย "/" ("บ้านเลขที่ 123/45") ให้ _SLASH_PAIR จัดการต่อ
 _CODE_NUMBER = re.compile(
-    r"(?<![\w])(ห้อง|ชั้น|ที่นั่ง|เบอร์|รหัส|ตู้|บ้านเลขที่|โต๊ะ|เที่ยวบิน|ล็อค|ล็อก)"
-    r"\s*(\d{3,6})(?![\d\w])"
+    r"(ห้อง|ชั้น|ที่นั่ง|เบอร์|รหัส|ตู้|บ้านเลขที่|โต๊ะ|เที่ยวบิน|ล็อค|ล็อก"
+    r"|โทร|สายด่วน|ไปรษณีย์|ตู้ ?ปณ)"
+    r"\s*(\d{3,6})(?![\d\w/])"
 )
 
 # เลขที่คั่นหลักพันด้วยจุลภาค — ต้องจับก่อนเช่นกัน ไม่งั้น "1,234" จะถูกอ่านเป็น
@@ -361,10 +375,19 @@ _CODE_NUMBER = re.compile(
 _GROUPED_NUMBER = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})+)(?:\.(\d{1,2}))?(?![\d,])")
 
 # ตัวเลขที่ยืนเดี่ยว ๆ — ไม่ติดกับตัวอักษร ไม่ใช่ส่วนของ IP
-_STANDALONE_NUMBER = re.compile(r"(?<![\w.:])(\d{1,12})(?:\.(\d{1,6}))?(?![\w:])(?!\.\d)")
+_STANDALONE_NUMBER = re.compile(
+    r"(?<![\w.:])(-?)(\d{1,12})(?:\.(\d{1,6}))?(?![\w:])(?!\.\d)"
+)
 
 # ยาวขนาดนี้คนไทยอ่านทีละตัว ไม่อ่านเป็นจำนวน
 _DIGIT_BY_DIGIT_LENGTH = 8
+
+
+def _speak_quantity(token: str) -> str:
+    """อ่านตัวเลขที่รู้แน่ว่าเป็นจำนวน — จุลภาคคือหลักฐานว่าไม่ใช่รหัส"""
+    if "," in token:
+        return thai_number_to_words(int(token.replace(",", "")))
+    return _speak_integer(token)
 
 
 def _speak_integer(digits: str) -> str:
@@ -389,7 +412,10 @@ def _speak_phone(match: re.Match[str]) -> str:
     # เบอร์โทร เลขบัญชี เลขบัตร และเลขประจำตัว ล้วนยาวและอ่านทีละตัวทั้งหมด
     # ไม่ต้องแยกประเภท แค่ยาวพอและมีตัวคั่นก็พอ
     long_enough = 9 <= len(digits) <= 20
-    return read_digits(digits) if long_enough else raw
+    # ต้องมีร่องรอยว่าเป็นเบอร์จริง ไม่งั้น "ราคา 1500 2000 3000 บาท" หรือ
+    # "ปี 2566 2567 2568" จะถูกเหมารวมเป็นเบอร์เดียวแล้วอ่านทีละตัวยาวเหยียด
+    looks_like_phone = "-" in raw or raw[0] in "+0"
+    return read_digits(digits) if long_enough and looks_like_phone else raw
 
 
 def _speak_date(match: re.Match[str]) -> str:
@@ -440,24 +466,30 @@ def expand_numbers_for_speech(text: str) -> str:
         window = text[max(0, match.start() - 20) : match.start()]
         joiner = "ต่อ" if _SCORE_CONTEXT.search(window) else "ถึง"
         return (
-            f"{_speak_integer(match.group(1))}{joiner}{_speak_integer(match.group(2))}"
+            f"{_speak_quantity(match.group(1))}{joiner}"
+            f"{_speak_quantity(match.group(2))}"
         )
 
-    text = _NUMBER_RANGE.sub(range_or_score, text)
     text = _SLASH_PAIR.sub(
         lambda m: f"{_speak_integer(m.group(1))}ทับ{_speak_integer(m.group(2))}", text
     )
+
     def grouped(match: re.Match[str]) -> str:
-        spoken = _speak_integer(match.group(1).replace(",", ""))
+        # จุลภาคคั่นหลักพันคือหลักฐานว่าเป็น "จำนวน" ไม่ใช่รหัส จึงอ่านเป็นจำนวน
+        # เสมอ ไม่ต้องผ่าน _speak_integer ที่จะอ่าน "12,345,678" ทีละตัว
+        spoken = thai_number_to_words(int(match.group(1).replace(",", "")))
         if match.group(2):
             spoken += f" จุด {read_digits(match.group(2))}"
         return spoken
 
+    text = _NUMBER_RANGE.sub(range_or_score, text)
     text = _GROUPED_NUMBER.sub(grouped, text)
 
     def replace(match: re.Match[str]) -> str:
-        whole, decimal = match.group(1), match.group(2)
-        spoken = _speak_integer(whole)
+        sign, whole, decimal = match.group(1), match.group(2), match.group(3)
+        # ขีดกลางหน้าเลข TTS อ่านไม่ออก "อุณหภูมิ -5 องศา" จึงฟังเป็น "ห้าองศา"
+        # ซึ่งความหมายกลับด้าน
+        spoken = ("ลบ" if sign else "") + _speak_integer(whole)
         if decimal:
             spoken = f"{spoken} จุด {read_digits(decimal)}"
         # ไม่เติมช่องว่างรอบคำอ่าน — ภาษาไทยเขียนติดกันอยู่แล้ว ("ราคา199บาท" ->
