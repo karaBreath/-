@@ -92,7 +92,7 @@
   <section>
     <div class="panel">
       <h2>บทสนทนา</h2>
-      <div id="log"><p class="empty">กดปุ่ม “เริ่มคุย” แล้วพูดได้เลย ระบบฟังภาษาไทย</p></div>
+      <div id="log"><p class="empty">กดปุ่ม “เริ่มคุย” แล้วพูดได้เลย ระบบฟังภาษาไทยได้</p></div>
       <div class="controls">
         <button id="startBtn" class="primary">เริ่มคุย</button>
         <button id="talkBtn" hidden>กดค้างเพื่อพูด</button>
@@ -104,7 +104,7 @@
         <button id="sendBtn">ส่ง</button>
       </div>
       <div class="controls">
-        <label class="opt"><input type="checkbox" id="optServerTts" checked> ใช้เสียงจากเซิร์ฟเวอร์ (ไทยชัดกว่า)</label>
+        <label class="opt"><input type="checkbox" id="optServerTts" checked> ใช้เสียงจากเซิร์ฟเวอร์ (อ่านไทยชัดกว่า)</label>
         <label class="opt"><input type="checkbox" id="optBargeIn"> พูดแทรกได้ (ต้องใส่หูฟัง)</label>
       </div>
     </div>
@@ -113,7 +113,7 @@
   <aside>
     <div class="panel">
       <h2>กำลังคุยกับ</h2>
-      <div id="speakerBox"><p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูสิครับ</p></div>
+      <div id="speakerBox"><p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลยค่ะ</p></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <h2>สิ่งที่จำได้เกี่ยวกับคุณ</h2>
@@ -189,11 +189,14 @@ function setState(state) {
   stateEl.className = `state ${state}`;
 }
 
+let speakerRequestId = 0;
+
 async function refreshSpeaker(speaker) {
+  const request = ++speakerRequestId;
   currentSpeaker = speaker;
   speakerBox.replaceChildren();
   if (!speaker) {
-    speakerBox.append(el("p", "empty", "ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูสิ"));
+    speakerBox.append(el("p", "empty", "ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลยค่ะ"));
     forgetBtn.disabled = true;
     return;
   }
@@ -202,12 +205,13 @@ async function refreshSpeaker(speaker) {
   name.style.fontWeight = "600";
   speakerBox.append(
     name,
-    el("div", "empty", `คำลงท้ายที่เขาใช้: ${speaker.particle ?? "-"} · คุยกันมาแล้ว ${speaker.turns ?? 0} เทิร์น`),
+    el("div", "empty", `คำลงท้ายที่คุณใช้: ${speaker.particle ?? "-"} · คุยกันมาแล้ว ${speaker.turns ?? 0} ข้อความ`),
   );
   forgetBtn.disabled = false;
 
   try {
     const detail = await client.speaker(speaker.id);
+    if (request !== speakerRequestId) return; // มีคำขอใหม่กว่าแล้ว
     factBox.replaceChildren();
     if (!detail.facts.length) {
       factBox.append(el("p", "empty", "ยังไม่มีอะไรจำไว้"));
@@ -260,6 +264,8 @@ const handlers = {
 };
 
 startBtn.addEventListener("click", async () => {
+  // ปิดปุ่มทันที ไม่ใช่หลัง await — ช่วงรอสิทธิ์ไมโครโฟนกินเวลาได้หลายวินาที
+  startBtn.disabled = true;
   talk = new VoiceConversation(client, {
     ...handlers,
     serverTts: document.getElementById("optServerTts").checked,
@@ -268,13 +274,13 @@ startBtn.addEventListener("click", async () => {
   });
   try {
     await talk.start();
-    startBtn.disabled = true;
     stopBtn.disabled = false;
     // เบราว์เซอร์ที่ถอดเสียงเองไม่ได้ต้องใช้โหมดกดพูด ไม่งั้นจะอัดค้างไว้เฉย ๆ
     // โดยไม่ส่งอะไรเลย ซึ่งเป็นอาการที่ Firefox และ Safari เจอ
     talkBtn.hidden = canRecognize;
   } catch (error) {
     talk = null;
+    startBtn.disabled = false;
     addTurn("ระบบ", `เปิดไมโครโฟนไม่ได้: ${error.message}`);
   }
 });
@@ -286,6 +292,7 @@ stopBtn.addEventListener("click", () => {
   stopBtn.disabled = true;
   talkBtn.hidden = true;
   talkBtn.classList.remove("recording");
+  talkBtn.textContent = "กดค้างเพื่อพูด";
   setState("idle");
 });
 
@@ -295,7 +302,8 @@ function beginPushToTalk(event) {
   if (!talk) return;
   talkBtn.classList.add("recording");
   talkBtn.textContent = "ปล่อยเพื่อส่ง";
-  setState("listening");
+  // ต้องบอกให้เริ่มนับเสียงตรงนี้ ไม่งั้นจะส่งเสียงที่สะสมไว้ก่อนกดไปด้วยทั้งหมด
+  talk.pushToTalkStart();
 }
 async function endPushToTalk(event) {
   event.preventDefault();
@@ -324,7 +332,8 @@ async function sendTyped() {
   } catch (error) {
     addTurn("ระบบ", `ส่งข้อความไม่สำเร็จ: ${error.message}`);
   } finally {
-    setState(talk ? "listening" : "idle");
+    // อย่าทับสถานะของโหมดเสียงที่กำลังทำงานอยู่
+    if (!talk) setState("idle");
   }
 }
 
@@ -336,11 +345,15 @@ document.getElementById("textinput").addEventListener("keydown", (event) => {
 
 forgetBtn.addEventListener("click", async () => {
   if (!currentSpeaker) return;
-  if (!confirm(`ลบความจำทั้งหมดเกี่ยวกับ ${currentSpeaker.name}? เอากลับไม่ได้`)) return;
+  if (!confirm(
+    `ลบความจำทั้งหมดเกี่ยวกับ ${currentSpeaker.name} ใช่ไหม\n\n` +
+    "ทั้งสิ่งที่จำไว้ บทสรุป และบทสนทนาเก่า ลบแล้วกู้คืนไม่ได้\n" +
+    "(ลายเสียงที่ใช้จำว่าคุณเป็นใครจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี)"
+  )) return;
   try {
     const removed = await client.forgetMemory(currentSpeaker.id);
     const total = removed.facts + removed.summaries + removed.turns;
-    addTurn("ระบบ", `ลบความจำแล้ว ${total} รายการ (สิ่งที่จำไว้ ${removed.facts}, บทสรุป ${removed.summaries}, บทสนทนา ${removed.turns})`);
+    addTurn("ระบบ", `ลบความจำไปแล้วทั้งหมด ${total} รายการ (สิ่งที่จำไว้ ${removed.facts}, บทสรุป ${removed.summaries}, บทสนทนา ${removed.turns})`);
     await refreshSpeaker(currentSpeaker);
   } catch (error) {
     addTurn("ระบบ", `ลบความจำไม่สำเร็จ: ${error.message}`);

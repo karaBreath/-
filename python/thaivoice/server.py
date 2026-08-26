@@ -27,6 +27,7 @@ import base64
 import logging
 import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -119,6 +120,14 @@ class ServerRuntime:
         )
         self._sessions: "OrderedDict[str, ConversationSession]" = OrderedDict()
         self._lock = threading.Lock()
+        # executor แยกสำหรับงานสตรีมของ WebSocket
+        #
+        # ถ้าใช้ executor เริ่มต้นร่วมกับ asyncio.to_thread ของทุก endpoint
+        # การสตรีมแต่ละเทิร์นจะยึดเธรดไว้ตลอดการเรียกโมเดล พอมี WebSocket
+        # หลายสิบตัวพร้อมกัน endpoint ธรรมดาอย่าง /api/chat จะรอคิวนานเป็นสิบวินาที
+        self.stream_executor = ThreadPoolExecutor(
+            max_workers=32, thread_name_prefix="thaivoice-stream"
+        )
 
     def session(self, session_id: "str | None") -> ConversationSession:
         """คืนบทสนทนาสำหรับ session นี้
@@ -161,8 +170,10 @@ class ServerRuntime:
     def close(self) -> None:
         if self.extractor is not None:
             self.extractor.shutdown(wait=False)
+        self.stream_executor.shutdown(wait=False)
         with self._lock:
             self._sessions.clear()
+        self.store.close()
 
 
 def _find_web_root() -> "Path | None":
@@ -515,11 +526,26 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
 
         try:
             while True:
+                # รับเฟรมดิบเอง เพื่อแยกให้ออกระหว่าง "การเชื่อมต่อปิด" กับ
+                # "ส่งข้อมูลผิดรูปมา" ของเดิมใช้ receive_json() ซึ่งโยน exception
+                # เหมือนกันทั้งสองกรณี ทำให้เฟรมไบนารีหรือข้อความที่ไม่ใช่ JSON
+                # ปิดการเชื่อมต่อไปเงียบ ๆ แล้วไคลเอนต์รอคำตอบที่ไม่มีวันมา
                 try:
-                    message = await websocket.receive_json()
+                    frame = await websocket.receive()
                 except Exception:
-                    # ไม่ใช่ JSON หรือการเชื่อมต่อปิดไปแล้ว
                     break
+                if frame.get("type") == "websocket.disconnect":
+                    break
+                if frame.get("text") is None:
+                    await fail("รองรับเฉพาะข้อความ JSON ไม่รองรับเฟรมไบนารี")
+                    continue
+                try:
+                    import json as _json
+
+                    message = _json.loads(frame["text"])
+                except Exception:
+                    await fail("ข้อมูลไม่ใช่ JSON ที่ถูกต้อง")
+                    continue
                 if not isinstance(message, dict):
                     await fail("รูปแบบข้อความไม่ถูกต้อง ต้องเป็นอ็อบเจ็กต์ JSON")
                     continue
@@ -560,7 +586,8 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
                     async for event in _stream_async(
                         lambda: session.stream_exchange(
                             text, pcm=pcm, speaker=speaker, speak=speak, sample_rate=rate
-                        )
+                        ),
+                        runtime.stream_executor,
                     ):
                         payload: dict = {"type": event.type, "text": event.text}
                         if event.speaker is not None:
@@ -584,7 +611,7 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
     return app
 
 
-async def _stream_async(make_iterator):
+async def _stream_async(make_iterator, executor=None):
     """รัน generator ที่บล็อกในเธรดแยก แล้วส่งออกมาแบบ async
 
     งานเรียกโมเดลและสังเคราะห์เสียงเป็นงานบล็อก ถ้ารันบน event loop ตรง ๆ
@@ -618,7 +645,7 @@ async def _stream_async(make_iterator):
         finally:
             push(sentinel)
 
-    loop.run_in_executor(None, worker)
+    loop.run_in_executor(executor, worker)
 
     try:
         while True:

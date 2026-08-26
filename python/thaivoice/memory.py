@@ -239,12 +239,20 @@ class MemoryStore:
         particle: str | None = None,
         language: str = "th",
         meta: dict[str, Any] | None = None,
+        allow_duplicate_name: bool = False,
     ) -> Speaker:
+        """สร้างผู้สนทนาใหม่
+
+        ``allow_duplicate_name`` ใช้เมื่อรู้แน่ว่าเป็นคนละคนแม้ชื่อจะซ้ำกัน
+        (เช่นลายเสียงไม่ตรงกับคนเดิมที่ชื่อนี้) ระบบจะเก็บกุญแจภายในแยกกัน
+        โดยที่ชื่อที่แสดงยังเหมือนเดิม
+        """
         clean = " ".join((display_name or "").split())
         if not clean:
             raise ValueError("ชื่อผู้สนทนาว่างเปล่า")
         now = time.time()
         with self._lock:
+            key = self._free_name_key(clean) if allow_duplicate_name else normalize_name(clean)
             cur = self._conn.execute(
                 """INSERT INTO speakers
                    (display_name, name_key, nickname, gender, particle, language,
@@ -252,7 +260,7 @@ class MemoryStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     clean,
-                    normalize_name(clean),
+                    key,
                     nickname,
                     gender,
                     particle,
@@ -267,6 +275,18 @@ class MemoryStore:
         got = self.get_speaker(speaker_id)
         assert got is not None
         return got
+
+    def _free_name_key(self, display_name: str) -> str:
+        """หากุญแจชื่อที่ยังว่างอยู่ (เรียกใต้ lock แล้ว)"""
+        base = normalize_name(display_name)
+        candidate = base
+        index = 2
+        while self._conn.execute(
+            "SELECT 1 FROM speakers WHERE name_key = ?", (candidate,)
+        ).fetchone():
+            candidate = f"{base}#{index}"
+            index += 1
+        return candidate
 
     def get_or_create_speaker(self, display_name: str, **fields: Any) -> tuple[Speaker, bool]:
         """หาคนจากชื่อ ถ้าไม่มีก็สร้าง — ปลอดภัยเมื่อมีหลายคำขอพร้อมกัน
@@ -583,6 +603,15 @@ class MemoryStore:
             }
             self._conn.commit()
         return {key: max(0, value) for key, value in removed.items()}
+
+    def voiceprint_for(self, speaker_id: int, backend: str) -> list[float] | None:
+        """ลายเสียงของคนคนนี้ หรือ ``None`` ถ้ายังไม่มี"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT embedding FROM voiceprints WHERE speaker_id = ? AND backend = ?",
+                (speaker_id, backend),
+            ).fetchone()
+        return _unpack(row["embedding"]) if row else None
 
     def speaker_exists(self, speaker_id: int) -> bool:
         with self._lock:

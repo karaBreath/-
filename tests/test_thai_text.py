@@ -272,6 +272,10 @@ class TestParticleCollisions:
             "ค่าไฟเดือนนี้แพงมากเลย",   # ค่า = ค่าใช้จ่าย
             "คะแนนสอบออกหรือยัง",       # คะ ใน คะแนน
             "เสื้อตัวนี้คับไปหน่อย",      # คับ = แน่น
+            "เสื้อคับ",
+            "กางเกงคับ",
+            "งานนี้ไม่มีค่า",
+            "สิ่งนี้มีคุณค่า",
             "ผมมีอาการปวดขา",           # ขา = อวัยวะ
             "ขายของออนไลน์",            # ขา ใน ขาย
             "เสื้อสีขาวสวยดี",           # ขา ใน ขาว
@@ -287,7 +291,6 @@ class TestParticleCollisions:
             ("ผมชื่อสมชายครับ", "male"),
             ("ผมชื่อสมชายครับผม", "male"),
             ("หนูชื่อแนนค่ะ", "female"),
-            ("ขอบคุณค่า", "female"),
             ("ไปไหนมาคะ", "female"),
             ("ได้เลยครับ.", "male"),
         ],
@@ -573,3 +576,129 @@ class TestTimeAndPhoneReading:
         assert "ยี่สิบนาฬิกาสามสิบนาที" in spoken
         assert "หนึ่งพันห้าร้อย" in spoken
         assert "," not in spoken
+
+
+class TestSpokenNumberForms:
+    """รูปแบบตัวเลขที่คนไทยเขียนจริง ตรวจว่าพูดออกมาแล้วความหมายไม่เพี้ยน"""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # ขีดกลางอ่านออกเสียงไม่ได้ TTS จะกลืนหาย ทำให้ "3-5 คน" ฟังเป็น "สามห้าคน"
+            ("มากันประมาณ 3-5 คน", "สามถึงห้า"),
+            ("อ่านหน้า 12-15", "สิบสองถึงสิบห้า"),
+            ("คะแนน 2-1", "สองต่อหนึ่ง"),
+            ("สกอร์ 3-0", "สามต่อศูนย์"),
+            ("บ้านเลขที่ 99/1", "เก้าสิบเก้าทับหนึ่ง"),
+        ],
+    )
+    def test_ช่วงตัวเลขสกอร์และเลขที่(self, text, expected):
+        spoken = expand_numbers_for_speech(text)
+        assert expected in spoken, spoken
+        assert "-" not in spoken and "/" not in spoken
+
+    @pytest.mark.parametrize(
+        "text",
+        ["ห้อง 2105", "ชั้น 305", "เบอร์ 1234", "รหัส 4589", "ที่นั่ง 12345"],
+    )
+    def test_เลขรหัสอ่านทีละตัว(self, text):
+        # คนไทยอ่าน "ห้อง 2105" ว่า "ห้องสองหนึ่งศูนย์ห้า" ไม่ใช่ "สองพันหนึ่งร้อยห้า"
+        spoken = expand_numbers_for_speech(text)
+        assert not any(word in spoken for word in ("ร้อย", "พัน", "หมื่น")), spoken
+
+    def test_เลขทั่วไปยังอ่านเป็นจำนวน(self):
+        assert "ยี่สิบห้า" in expand_numbers_for_speech("อายุ 25 ปี")
+        assert "สองพันห้าร้อยหกสิบแปด" in expand_numbers_for_speech("ปี 2568")
+
+    @pytest.mark.parametrize(
+        "text",
+        ["เลขบัญชี 123-4-56789-0", "บัตร 1234-5678-9012-3456", "เบอร์ 081-234-5678"],
+    )
+    def test_เลขรหัสยาวที่มีตัวคั่นอ่านทีละตัว(self, text):
+        spoken = expand_numbers_for_speech(text)
+        assert not any(word in spoken for word in ("ร้อย", "พัน", "หมื่น")), spoken
+
+    def test_เลขคั่นจุลภาคที่มีทศนิยม(self):
+        # เดิมกลุ่มจุลภาคกินแต่ส่วนจำนวนเต็ม เหลือ ".50" เป็นตัวเลขดิบไปถึง TTS
+        spoken = expand_numbers_for_speech("ราคา 1,234.50 บาท")
+        assert "หนึ่งพันสองร้อยสามสิบสี่" in spoken
+        assert "จุด" in spoken
+        assert not any(ch.isdigit() for ch in spoken), spoken
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("นัดกันตอน 20.30 นะคะ", "ยี่สิบนาฬิกาสามสิบนาที"),
+            ("เจอกัน 19.00 ที่ร้าน", "สิบเก้านาฬิกา"),
+            ("ประชุมเวลา 8.30", "แปดนาฬิกาสามสิบนาที"),
+        ],
+    )
+    def test_เวลาแบบจุดที่ไม่มี_น_แต่มีคำบอกเวลา(self, text, expected):
+        assert expected in expand_numbers_for_speech(text)
+
+    @pytest.mark.parametrize("text", ["สูง 3.50 เมตร", "กว้าง 2.75 เมตร", "หนัก 1.20 กิโล"])
+    def test_ทศนิยมที่ไม่มีบริบทเวลายังเป็นทศนิยม(self, text):
+        spoken = expand_numbers_for_speech(text)
+        assert "นาฬิกา" not in spoken, spoken
+        assert "จุด" in spoken
+
+    def test_ไม่เหลือ_น_ลอยหลังเวลา(self):
+        assert expand_numbers_for_speech("ประชุม 9:00 น.").strip().endswith("เก้านาฬิกา")
+
+
+class TestChunkerKeepsWordsIntact:
+    """จุดตัดต้องไม่ทำให้คำหรือความหมายขาด"""
+
+    CASES = [
+        "เขาเป็นคนคับแคบมากเลยค่ะ ไม่ค่อยแบ่งใครเลย",
+        "ตอนนี้ยังไม่ทราบค่าใช้จ่ายทั้งหมดค่ะ",
+        "เดือนนี้ค่าไฟแพงกว่าเดือนที่แล้วเยอะเลยค่ะ",
+        "บริษัทกำลังหาผู้รับจ้างรายใหม่อยู่ค่ะ",
+        "เขาเกิดเมื่อ พ.ศ. 2540 ที่จังหวัดเชียงใหม่ค่ะ",
+        "ประชุมพรุ่งนี้เวลา 13.30 น. ที่ห้องใหญ่ค่ะ",
+        "ราคารวมทั้งหมด 1,234.50 บาทค่ะ เดี๋ยวส่งใบเสร็จให้นะคะ",
+    ]
+
+    @pytest.mark.parametrize("reply", CASES)
+    @pytest.mark.parametrize("step", [1, 3, 5, 7, 11])
+    def test_ข้อความครบทุกจังหวะการสตรีม(self, reply, step):
+        chunker = SpeechChunker()
+        chunks = []
+        for index in range(0, len(reply), step):
+            chunks.extend(chunker.feed(reply[index : index + step]))
+        chunks.extend(chunker.flush())
+        assert "".join(chunks).replace(" ", "") == reply.replace(" ", "")
+
+    @pytest.mark.parametrize("step", [1, 3, 5, 7, 11])
+    def test_คำลงท้ายที่เป็นคำย่อยต้องไม่ทำให้ตัดกลางคำ(self, step):
+        """"คับ" ใน "คับแคบ" และ "ค่า" ใน "ค่าไฟ" เคยกลายเป็นจุดตัด
+
+        เกิดเฉพาะระหว่างสตรีมเมื่อบัฟเฟอร์จบกลางคำนั้นพอดี จึงเกิดแบบสุ่ม
+        ตามจังหวะที่ข้อความไหลมา และตามหาสาเหตุจากรายงานบัคได้ยากมาก
+        """
+        reply = "เขาเป็นคนคับแคบมากเลยค่ะ"
+        chunker = SpeechChunker()
+        chunks = []
+        for index in range(0, len(reply), step):
+            chunks.extend(chunker.feed(reply[index : index + step]))
+        chunks.extend(chunker.flush())
+        assert all("คนคับ" not in chunk or "คับแคบ" in chunk for chunk in chunks), chunks
+
+    @pytest.mark.parametrize("step", [1, 3, 5, 7])
+    def test_ตัวย่อและเวลาไม่ถูกตัดกลาง(self, step):
+        reply = "ประชุมเวลา 13.30 น. ที่ตึก พ.ศ. ใหม่ค่ะ"
+        chunker = SpeechChunker()
+        chunks = []
+        for index in range(0, len(reply), step):
+            chunks.extend(chunker.feed(reply[index : index + step]))
+        chunks.extend(chunker.flush())
+        for chunk in chunks:
+            assert not chunk.endswith("พ."), chunk
+            assert not chunk.endswith("13.30"), chunk
+
+    def test_เวลายังถูกแปลงถูกหลังตัดท่อน(self):
+        reply = "ประชุมพรุ่งนี้เวลา 13.30 น. ที่ห้องใหญ่ค่ะ"
+        chunker = SpeechChunker()
+        chunks = list(chunker.feed(reply)) + list(chunker.flush())
+        spoken = " ".join(clean_for_speech(chunk) for chunk in chunks)
+        assert "สิบสามนาฬิกาสามสิบนาที" in spoken, spoken

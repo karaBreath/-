@@ -147,15 +147,30 @@ class MemoryExtractor:
         # เธรดเดียวพอ — ให้งานสกัดความจำเรียงคิวกัน ไม่แย่ง rate limit กับบทสนทนา
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thaivoice-mem")
         self._lock = threading.Lock()
+        self._closed = False
 
     def shutdown(self, wait: bool = True) -> None:
+        self._closed = True
         self._pool.shutdown(wait=wait)
 
     # ── API หลัก ────────────────────────────────────────────────────────
     def schedule(self, speaker: Speaker, turns: Sequence[Turn]) -> None:
-        """สั่งให้สกัดความจำเบื้องหลัง (ไม่รอผล)"""
+        """สั่งให้สกัดความจำเบื้องหลัง (ไม่รอผล)
+
+        ถ้า pool ถูกปิดไปแล้ว (เช่นคำขอมาถึงระหว่างเซิร์ฟเวอร์กำลังปิดตัว)
+        ให้ข้ามไปเงียบ ๆ ไม่ใช่ทำให้คำขอนั้นกลายเป็น 500
+        """
         snapshot = list(turns)
-        self._pool.submit(self._safe_run, speaker, snapshot)
+        self._submit(self._safe_run, speaker, snapshot)
+
+    def _submit(self, fn, *args) -> None:
+        if self._closed:
+            log.debug("ตัวสกัดความจำปิดแล้ว ข้ามงานนี้")
+            return
+        try:
+            self._pool.submit(fn, *args)
+        except RuntimeError:
+            self._closed = True
 
     def run_now(self, speaker: Speaker, turns: Sequence[Turn]) -> MemoryUpdate | None:
         """สกัดแบบรอผล — ใช้ในเทสต์และสคริปต์ที่ต้องการผลทันที"""
@@ -261,7 +276,7 @@ class MemoryExtractor:
         """สรุปบทสนทนาสะสมทุก ๆ N เทิร์น (ทำเบื้องหลัง)"""
         total = self.store.turn_count(speaker.id)
         if total and total % max(2, self.settings.summarize_every) == 0:
-            self._pool.submit(self._safe_summarize, speaker)
+            self._submit(self._safe_summarize, speaker)
 
     def _safe_summarize(self, speaker: Speaker) -> None:
         try:

@@ -331,3 +331,156 @@ describe("VoiceConversation", () => {
     assert.equal(FakeAudioContext.live, 0);
   });
 });
+
+describe("VoiceConversation — บัคที่เจอจากการตรวจรอบสอง", () => {
+  const client = () => new ThaiVoiceClient({ baseUrl: "http://x", sessionId: "t" });
+
+  async function started(options = {}) {
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      ...options,
+    });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances[0];
+    return { talk, recognition };
+  }
+
+  test("คิวเสียงว่างชั่วคราวกลางเทิร์นต้องไม่ถือว่าจบเทิร์น", async () => {
+    // เซิร์ฟเวอร์สังเคราะห์เสียงประโยคถัดไป *หลัง* ส่งประโยคก่อนหน้าไปแล้ว
+    // คิวจึงว่างชั่วคราวเป็นเรื่องปกติ ถ้าถือว่าจบเทิร์นตอนนั้น ไมโครโฟนจะถูก
+    // เปิดกลับมาทั้งที่บอทยังพูดอยู่ แล้วระบบจะได้ยินเสียงตัวเองแล้วตอบตัวเอง
+    const { talk, recognition } = await started({ bargeIn: false });
+    recognition.emitFinal("สวัสดี");
+    await sleep(30);
+
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "chunk", text: "ประโยคหนึ่ง", audio: "QUFB" });
+    await sleep(60); // ปล่อยให้เสียงประโยคแรกเล่นจบก่อนประโยคถัดไปมาถึง
+
+    assert.equal(talk.currentState, "speaking", "ยังตอบไม่จบ ต้องไม่กลับไปฟัง");
+    assert.equal(recognition.running, false, "ไมโครโฟนต้องยังปิดอยู่");
+
+    socket.emit({ type: "chunk", text: "ประโยคสอง", audio: "QkJC" });
+    socket.emit({ type: "done", text: "ประโยคหนึ่งประโยคสอง" });
+    await sleep(120);
+
+    assert.equal(talk.currentState, "listening");
+    assert.equal(recognition.running, true, "จบแล้วต้องกลับมาฟัง");
+    talk.stop();
+  });
+
+  test("หางของเทิร์นก่อนต้องไม่ถูกนับเป็นคำตอบของเทิร์นใหม่", async () => {
+    const replies = [];
+    const { talk, recognition } = await started({ bargeIn: true, onReply: (t) => replies.push(t) });
+
+    recognition.emitFinal("คำถามที่หนึ่ง");
+    await sleep(30);
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "delta", text: "ตอบหนึ่ง-" });
+
+    // ผู้ใช้ถามใหม่ก่อนคำตอบแรกจะจบ
+    recognition.onspeechstart();
+    recognition.emitFinal("คำถามที่สอง");
+    await sleep(30);
+
+    // หางของคำตอบแรกเพิ่งมาถึง
+    socket.emit({ type: "delta", text: "ตอบหนึ่งท้าย" });
+    socket.emit({ type: "chunk", text: "ตอบหนึ่งท้าย", audio: "T05F" });
+    socket.emit({ type: "done", text: "ตอบหนึ่งเต็ม" });
+    await sleep(80);
+
+    assert.equal(FakeAudio.played.length, 0, `เสียงของเทิร์นเก่าไม่ควรถูกเล่น: ${FakeAudio.played}`);
+    assert.ok(!replies.includes("ตอบหนึ่งเต็ม"), `คำตอบเก่าถูกรายงานเป็นของเทิร์นใหม่: ${replies}`);
+    assert.deepEqual(socket.sent.map((m) => m.text), ["คำถามที่หนึ่ง", "คำถามที่สอง"]);
+    talk.stop();
+  });
+
+  test("การเชื่อมต่อหลุดกลางเทิร์นต้องแจ้งและปลดสถานะ", async () => {
+    const errors = [];
+    const { talk, recognition } = await started({
+      bargeIn: false,
+      onError: (e) => errors.push(e.message),
+    });
+    recognition.emitFinal("สวัสดี");
+    await sleep(30);
+    assert.equal(talk.currentState, "thinking");
+
+    FakeWebSocket.instances[0].close();
+    await sleep(30);
+
+    assert.ok(errors.length > 0, "ต้องบอกผู้ใช้ว่าหลุด");
+    assert.equal(talk.currentState, "listening", "ต้องไม่ค้างที่ กำลังคิด");
+    assert.equal(recognition.running, true, "ไมโครโฟนต้องถูกเปิดกลับมา");
+    talk.stop();
+  });
+
+  test("การเชื่อมต่อที่ตายแล้วต้องไม่ล้างตัวที่เพิ่งเปิดใหม่", async () => {
+    const { talk, recognition } = await started({ bargeIn: true });
+
+    recognition.emitFinal("หนึ่ง");
+    await sleep(30);
+    const dead = FakeWebSocket.instances[0];
+    dead.close();
+    await sleep(20);
+
+    recognition.emitFinal("สอง");
+    await sleep(40);
+
+    const open = FakeWebSocket.instances.filter((s) => s.readyState === 1);
+    assert.equal(open.length, 1, `มี socket เปิดค้าง ${open.length} ตัว`);
+    talk.stop();
+  });
+
+  test("โหมดกดพูดต้องส่งเฉพาะช่วงที่กดค้าง", async () => {
+    // ของเดิมส่งทั้งหน้าต่างที่สะสมไว้ (ถึง 30 วินาที) ทำให้ทั้งการถอดเสียงและ
+    // ลายเสียงคำนวณจากเสียงคนอื่นในห้องที่ดังก่อนหน้าไปด้วย
+    let uploaded = null;
+    const spyClient = new ThaiVoiceClient({
+      baseUrl: "http://x",
+      sessionId: "t",
+      fetchImpl: async (_url, init) => {
+        uploaded = init.body.get("audio");
+        return {
+          ok: true,
+          json: async () => ({
+            transcript: "x", reply: "", chunks: [], speaker: null,
+            session_id: "t", audio: null, identified_by: null,
+          }),
+        };
+      },
+    });
+    const talk = new VoiceConversation(spyClient, {
+      useBrowserRecognition: false,
+      sendAudioForSpeakerId: true,
+    });
+    await talk.start();
+    const context = globalThis.__lastContext;
+
+    for (let i = 0; i < 20; i += 1) context.emit(new Float32Array(4096).fill(0.01)); // เสียงรบกวนก่อนกด
+    talk.pushToTalkStart();
+    context.emit(new Float32Array(4096).fill(0.5)); // ช่วงที่กดค้าง
+
+    await talk.pushToTalkStop();
+
+    assert.ok(uploaded, "ต้องอัปโหลดไฟล์เสียง");
+    // 4096 ตัวอย่างที่ 48 kHz ย่อเหลือ 16 kHz ประมาณ 1365 ตัวอย่าง = ~2774 ไบต์
+    assert.ok(uploaded.size < 10000, `อัปโหลดเสียงเกินช่วงที่กด: ${uploaded.size} ไบต์`);
+    talk.stop();
+  });
+
+  test("กดเริ่มคุยซ้ำระหว่างรอสิทธิ์ไมโครโฟนต้องไม่ได้ไมค์สองตัว", async () => {
+    FakeMedia.delay = 40;
+    const talk = new VoiceConversation(client(), { serverTts: false });
+    await Promise.all([talk.start(), talk.start(), talk.start()]);
+
+    assert.equal(FakeTrack.live, 1, `เปิดไมโครโฟน ${FakeTrack.live} ตัว`);
+    assert.equal(FakeAudioContext.live, 1);
+    assert.equal(FakeSpeechRecognition.instances.length, 1);
+
+    talk.stop();
+    await sleep(40);
+    assert.equal(FakeTrack.live, 0);
+  });
+});

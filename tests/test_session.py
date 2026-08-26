@@ -205,7 +205,7 @@ class TestForgetCommand:
         session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
         done = session.exchange("ยืนยัน", speaker=speaker, speak=False)
 
-        assert "ลบความจำทั้งหมดแล้ว" in done.reply
+        assert "ลบให้เรียบร้อยแล้ว" in done.reply
         assert store.facts_for(speaker.id) == []
         assert store.latest_summary(speaker.id) is None, "บทสรุปต้องถูกลบด้วย"
         assert all(
@@ -223,7 +223,8 @@ class TestForgetCommand:
         assert "ไม่ลบ" in answer.reply
         assert store.facts_for(speaker.id)
 
-    def test_ตอบเรื่องอื่นถือว่ายกเลิกแล้วคุยต่อ(self, session, store, fake_client):
+    def test_ตอบเรื่องอื่นต้องบอกให้ชัดว่ายังไม่ได้ลบ(self, session, store):
+        """ของเดิมเงียบแล้วไปคุยเรื่องอื่นต่อ ผู้ใช้ไม่รู้ว่าตกลงลบหรือยัง"""
         speaker = session.register_speaker("เดช")
         store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
 
@@ -231,13 +232,54 @@ class TestForgetCommand:
         after = session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
 
         assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
-        assert after.reply == fake_client.replies[0]
+        assert "ยังไม่ได้ลบ" in after.reply
+        assert "ยืนยัน" in after.reply
+
+    def test_คำลงท้ายเดี่ยวไม่นับเป็นการยินยอมให้ลบ(self, session, store):
+        """"ครับ"/"ค่ะ" เป็นคำรับคำทั่วไป และระบบถอดเสียงก็แถมมาเองบ่อย
+
+        นี่คือด่านสุดท้ายก่อนลบข้อมูลถาวร จึงต้องขอคำที่ชัดเจน
+        """
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("ครับ", speaker=speaker, speak=False)
+
+        assert store.facts_for(speaker.id), "คำลงท้ายเดี่ยวต้องไม่ทำให้ลบ"
+
+    def test_คำขอลบหมดอายุ(self, session, store, monkeypatch):
+        """"ยืนยัน" ที่พูดขึ้นมาลอย ๆ อีกครึ่งชั่วโมงต่อมาต้องไม่ลบข้อมูล"""
+        import time as time_module
+
+        from thaivoice import session as session_module
+
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+
+        later = time_module.time() + session_module.FORGET_CONFIRM_TIMEOUT + 10
+        monkeypatch.setattr(session_module.time, "time", lambda: later)
+        session.exchange("ยืนยัน", speaker=speaker, speak=False)
+
+        assert store.facts_for(speaker.id), "คำขอที่หมดอายุแล้วต้องไม่ลบ"
+
+    def test_คนอื่นยกเลิกคำขอของคนอื่นไม่ได้(self, session, store):
+        เดช = session.register_speaker("เดช")
+        แนน = session.register_speaker("แนน")
+        store.upsert_fact(เดช.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=เดช, speak=False)
+        session.exchange("สวัสดี", speaker=แนน, speak=False)  # คนอื่นพูดแทรก
+        session.exchange("ยืนยัน", speaker=เดช, speak=False)
+
+        assert store.facts_for(เดช.id) == [], "เจ้าตัวยืนยันแล้วต้องลบได้"
 
     def test_ยังไม่รู้จักคนพูดต้องบอกตามจริง(self, store, fake_client, settings):
         """ของเดิมปล่อยให้โมเดลรับปากว่าลบให้แล้ว ทั้งที่ไม่มีอะไรถูกลบ"""
         session = _session(store, fake_client, settings, sticky=False)
         result = session.exchange("ลบความจำทั้งหมด", speak=False)
-        assert "ไม่มีอะไรต้องลบ" in result.reply
+        assert "ไม่มีความจำอะไรให้ลบ" in result.reply
 
     @pytest.mark.parametrize(
         "utterance,expected",

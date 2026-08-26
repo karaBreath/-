@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Protocol, Sequence, runtime_checkable
 
@@ -53,20 +54,31 @@ _NAME_PATTERNS = [
     # "ชื่อเล่นชื่อบิ๊กครับ" / "ชื่อเล่นว่าบิ๊ก" — ต้องมาก่อนกฎทั่วไป
     re.compile(rf"ชื่อเล่น(?:ชื่อ|ว่า|คือ)?\s*({_NAME_CHARS})"),
     # "ผมชื่อสมชายครับ" / "หนูชื่อว่าแนนค่ะ"
-    re.compile(rf"(?:^|\s){_PRONOUN}\s*ชื่อ(?:ว่า|จริงว่า)?\s*({_NAME_CHARS})"),
-    # "ชื่อเดชครับ" — ต้องอยู่ต้นประโยคเท่านั้น
-    re.compile(rf"(?:^|\s)ชื่อ(?:ว่า)?\s*({_NAME_CHARS})"),
+    # ลำดับใน (?:...) สำคัญ — ต้องลอง "จริงว่า" ก่อน "ว่า" ไม่งั้น "ชื่อจริงว่าอนุชา"
+    # จะจับได้เป็น "จริงว่าอนุชา" แล้วถูกปฏิเสธเพราะขึ้นต้นด้วย "จริง"
+    re.compile(rf"(?:^|\s){_PRONOUN}\s*ชื่อ(?:จริงว่า|ว่า)?\s*({_NAME_CHARS})"),
+    # "ชื่อเดชครับ" / "ชื่อผมสมชายครับ" — ต้องอยู่ต้นวรรคเท่านั้น
+    re.compile(rf"(?:^|\s)ชื่อ(?:จริงว่า|ว่า)?\s*(?:{_PRONOUN})?\s*({_NAME_CHARS})"),
     # "เรียกผมว่าพี่เดช" / "เรียกว่าโบท"
     re.compile(rf"เรียก(?:ผม|ฉัน|หนู|เรา|ดิฉัน)?ว่า\s*({_NAME_CHARS})"),
     # "เรียกเดชก็ได้"
     re.compile(rf"เรียก\s*({_NAME_CHARS}?)\s*ก็ได้"),
-    # "นี่ต้นเองนะ"
-    re.compile(rf"(?:^|\s)นี่\s*({_NAME_CHARS}?)\s*(?:เอง|นะ|น่ะ)"),
-    # "ผมเดชครับ" — สรรพนาม + ชื่อ + คำลงท้าย โดยไม่มีคำว่าชื่อ
-    re.compile(
-        rf"(?:^|\s){_PRONOUN}\s*({_NAME_CHARS}?)\s*"
-        r"(?:นะ)?(?:ครับผม|ครับ|ค่ะ|คะ)\s*[.!?]?\s*$"
-    ),
+    # "ผมคือสมชายครับ"
+    re.compile(rf"(?:^|\s){_PRONOUN}\s*คือ\s*({_NAME_CHARS})"),
+    #
+    # เคยมีอีกสองกฎตรงนี้ที่ถูก *ถอดออก* โดยตั้งใจ:
+    #
+    #   "นี่<X>เองนะ"          และ   "<สรรพนาม><X><คำลงท้าย>"
+    #
+    # ทั้งคู่เดาว่าคำที่อยู่ตรงกลางคือชื่อ ซึ่งเป็นจริงกับ "ผมเดชครับ" แต่ก็เป็นจริง
+    # กับประโยคธรรมดาอีกนับไม่ถ้วน: "ผมหิวครับ" -> ชื่อ "หิว", "ผมขอโทษครับ" ->
+    # ชื่อ "ขอโทษ", "หนูง่วงค่ะ" -> ชื่อ "ง่วง", "นี่เอกสารนะครับ" -> ชื่อ "เอกสาร"
+    # แต่ละครั้งคือการสร้างตัวตนใหม่แล้วผูกลายเสียงของผู้ใช้เข้ากับตัวตนนั้น
+    # ความจำจริงของเขาถูกทิ้งค้าง และครั้งหน้าระบบจะทักเขาว่า "คุณหิว"
+    #
+    # การแยกสองกรณีนี้ออกจากกันต้องใช้พจนานุกรมชื่อคน ซึ่งไม่มีทางครบ (ชื่อเล่นไทย
+    # จำนวนมากเป็นคำธรรมดาอยู่แล้ว เช่น ต้น น้ำ ก้อง) จึงเลือกตัดทิ้ง แล้วไปรับ
+    # "ชื่อเปล่า ๆ" เฉพาะตอนที่บอทเพิ่งถามชื่อแทน (ดู expecting_name)
     # ภาษาอังกฤษ — ต้องขึ้นต้นด้วยตัวใหญ่ ไม่งั้น "I'm going" จะกลายเป็นชื่อ "going"
     # ไม่ใช้ re.IGNORECASE เพราะต้องบังคับให้ *ชื่อ* ขึ้นต้นด้วยตัวใหญ่
     # ("I'm going" จะได้ไม่กลายเป็นชื่อ "going") จึงเขียนตัวเลือกตัวพิมพ์เอง
@@ -77,18 +89,30 @@ _NAME_PATTERNS = [
 ]
 
 # คำที่มักติดมาท้ายชื่อเวลาพูด ต้องตัดทิ้งเพราะภาษาไทยไม่เว้นวรรคระหว่างคำ
+# "นะ" เดี่ยว ๆ ไม่อยู่ในลิสต์นี้ เพราะเป็นพยางค์ของชื่อไทยจริง ("มานะ" "อนงค์นะ")
+# ตัดเฉพาะตอนที่มันเกาะอยู่กับคำลงท้ายจริง ("นะครับ" "นะคะ") ซึ่งชัดเจนว่าไม่ใช่ชื่อ
 _NAME_SUFFIXES = (
+    "นะครับผม", "นะครับ", "นะคะ", "นะค่ะ", "นะฮะ",
     "ครับผม", "ครับ", "คร้าบ", "คับ", "ค่ะ", "คะ", "ค่า", "ขา", "จ้า", "จ๊ะ", "จ้ะ",
-    "ฮะ", "นะ", "น่ะ", "เอง", "ก็ได้", "ได้เลย", "แหละ", "ล่ะ", "เลย", "อ่ะ",
+    "ฮะ", "เอง", "ก็ได้", "ได้เลย", "แหละ", "ล่ะ", "เลย", "อ่ะ",
 )
 
 # คำนำหน้าที่ไม่ใช่ส่วนหนึ่งของชื่อ
-_NAME_TITLES = ("นางสาว", "นาย", "นาง", "คุณ", "พี่", "น้อง", "น้า", "ป้า", "ลุง", "อา")
+#
+# ตั้งใจไม่ใส่คำสั้น ๆ อย่าง "อา" "น้า" "ป้า" เพราะมันไปกินต้นชื่อจริง:
+# "อาทิตย์" -> "ทิตย์", "อารีย์" -> "รีย์", "อาร์ม" -> "ร์ม" (ขึ้นต้นด้วยวรรณยุกต์
+# ซึ่งออกเสียงไม่ได้เลย) ส่วนคำยาวกว่านั้นชนกับชื่อจริงน้อยมาก
+_NAME_TITLES = ("นางสาว", "นาย", "นาง", "คุณ", "พี่", "น้อง")
+
+# อักขระที่ขึ้นต้นคำไทยไม่ได้ (สระตาม วรรณยุกต์ และเครื่องหมายกำกับ)
+# ถ้าตัดคำนำหน้าแล้วเหลือขึ้นต้นด้วยตัวพวกนี้ แปลว่าเราตัดกลางคำ ไม่ใช่ตัดคำนำหน้า
+# เช่น "คุณากร" ตัด "คุณ" ออกจะเหลือ "ากร" ซึ่งอ่านไม่ได้
+_CANNOT_START_WORD = "าิีึืุูัํ็์ฺ่้๊๋ๅๆ"
 
 # ถ้าชื่อที่จับได้ "ขึ้นต้นด้วย" คำพวกนี้ แปลว่าไม่ใช่การแนะนำตัว
 # (เช่น "ชื่อเสียง" = reputation, "ชื่อไฟล์" = filename)
 _NOT_A_NAME_PREFIXES = (
-    "เสียง", "เล่น", "จริง", "ไฟล์", "ร้าน", "ผู้", "หนัง", "บริษัท", "เพลง",
+    "ชื่อ", "เสียง", "เล่น", "จริง", "ไฟล์", "ร้าน", "ผู้", "หนัง", "บริษัท", "เพลง",
     "หนังสือ", "ยา", "โรค", "ถนน", "ซอย", "เมนู", "สินค้า", "แบรนด์", "ทีม",
     "วง", "ตัวละคร", "เรื่อง", "ลูก", "แมว", "หมา", "เพื่อน", "เขา", "เธอ",
     "อะไร", "นี้", "นั้น", "บัญชี", "โดเมน", "จังหวัด", "โรงเรียน", "เดียว",
@@ -96,12 +120,25 @@ _NOT_A_NAME_PREFIXES = (
 )
 
 # ถ้าในชื่อมีคำพวกนี้อยู่ แปลว่าจับเกินไปโดนคำอื่นเข้ามาด้วย
+# ระวัง: ห้ามใส่พยางค์ที่พบในชื่อคนไทยจริง ๆ ลงในลิสต์นี้
+# เคยใส่ "มา" "จำ" "ไป" ไว้ ทำให้ชื่อธรรมดาอย่าง มาลี มานี สมหมาย จำเนียร ไปรยา
+# ถูกปฏิเสธทิ้งหมด ซึ่งแย่กว่าปัญหาที่ตั้งใจกันตั้งแต่แรก
 _NAME_REJECT_SUBSTRINGS = (
-    "อะไร", "ไหม", "มั้ย", "เหรอ", "ยังไง", "คือ", "ว่า", "แล้ว", "ไป", "มา",
-    "ให้", "หน่อย", "ด้วย", "จำ", "ไม่",
+    "อะไร", "ไหม", "มั้ย", "เหรอ", "ยังไง", "คือ", "ว่า", "แล้ว",
+    "หน่อย", "ด้วย", "ไม่",
     # คำเชื่อม — ถ้าติดมาแปลว่าจับเลยขอบชื่อไปโดนประโยคถัดไปแล้ว
     "แต่", "และ", "หรือ", "กับ",
 )
+
+# คำที่เป็นคำตอบสั้น ๆ ได้ แต่ไม่มีทางเป็นชื่อคน
+# ใช้เฉพาะตอนที่บอทเพิ่งถามชื่อ ซึ่งเป็นบริบทเดียวที่เรายอมรับ "คำเปล่า ๆ" เป็นชื่อ
+_NOT_A_NAME_ANSWERS = {
+    "ครับ", "ครับผม", "ค่ะ", "คะ", "ค่า", "จ้า", "จ๊ะ", "ฮะ", "โอเค", "ตกลง",
+    "ใช่", "ไม่", "ไม่ใช่", "ได้", "ไม่ได้", "เอา", "ไม่เอา", "อะไร", "ไง",
+    "ขอโทษ", "ขอบคุณ", "สวัสดี", "หิว", "ง่วง", "เหนื่อย", "ป่วย", "เบื่อ",
+    "หยุด", "รอ", "แป๊บ", "เดี๋ยว", "อืม", "เออ", "หา", "อะ", "นะ", "จบ",
+    "ไม่บอก", "ลับ", "ไม่รู้", "ทำไม", "ยังไง", "ok", "yes", "no", "okay",
+}
 
 _STOPWORD_NAMES = {
     "อะไร", "ไหน", "ใคร", "นี้", "นั้น", "เธอ", "คุณ", "เขา", "มัน", "เรา",
@@ -118,14 +155,30 @@ def _clean_name(raw: str) -> str | None:
     while changed and name:
         changed = False
         for suffix in _NAME_SUFFIXES:
-            if len(name) > len(suffix) and name.endswith(suffix):
-                name = name[: -len(suffix)].strip()
+            if not name.endswith(suffix):
+                continue
+            rest = name[: -len(suffix)].strip()
+            # คำลงท้ายที่ขึ้นต้นด้วย "นะ" คลุมเครือ เพราะ "นะ" เป็นพยางค์ของชื่อได้
+            # "มานะครับ" ควรได้ "มานะ" ไม่ใช่ "มา" จึงยอมตัดเฉพาะเมื่อยังเหลือ
+            # ชื่อยาวพอ ไม่งั้นปล่อยให้ไปตัดแค่ "ครับ" ในรอบถัดไปแทน
+            minimum = 3 if suffix.startswith("นะ") else 2
+            if len(rest) >= minimum:
+                name = rest
                 changed = True
+                break
 
     # ตัดคำนำหน้า เช่น "พี่เดช" -> "เดช"
     for title in _NAME_TITLES:
         if len(name) > len(title) + 1 and name.startswith(title):
-            name = name[len(title) :].strip()
+            rest = name[len(title) :].strip()
+            # ถ้าส่วนที่เหลือขึ้นต้นด้วยเครื่องหมายผสมหรือสระหน้าที่ไม่มีพยัญชนะ
+            # แปลว่าเราตัดกลางคำ ไม่ใช่ตัดคำนำหน้า
+            if (
+                len(rest) >= 2
+                and unicodedata.category(rest[0]) != "Mn"
+                and rest[0] not in _CANNOT_START_WORD
+            ):
+                name = rest
             break
 
     if len(name) < 2 or len(name) > 15:
@@ -136,18 +189,26 @@ def _clean_name(raw: str) -> str | None:
         return None
     if any(bad in name for bad in _NAME_REJECT_SUBSTRINGS):
         return None
+    if name.lower() in _NOT_A_NAME_ANSWERS:
+        return None
     return name
 
 
-def extract_name_claim(text: str) -> str | None:
+def extract_name_claim(text: str, expecting_name: bool = False) -> str | None:
     """ดึงชื่อจากประโยคแนะนำตัว เช่น "ผมชื่อสมชายครับ" -> "สมชาย"
 
     คืน ``None`` เมื่อไม่มั่นใจ ซึ่งเป็นค่าที่ปลอดภัยกว่าเสมอ
 
+    ``expecting_name`` ใช้เมื่อบอท *เพิ่งถามชื่อไปหมาด ๆ* เท่านั้น ในบริบทนั้น
+    คำตอบสั้น ๆ อย่าง "เดช" คือชื่อแน่นอน ซึ่งเป็นการเดาที่ปลอดภัยเพราะเรารู้ว่า
+    เราเพิ่งถามอะไรไป ต่างจากการเดาจากประโยคลอย ๆ ที่ผิดได้ง่ายมาก
+
     >>> extract_name_claim("ผมชื่อสมชายครับ")
     'สมชาย'
     >>> extract_name_claim("เพื่อนผมชื่อสมชาย")
-    >>> extract_name_claim("ชื่อร้านนี้คืออะไร")
+    >>> extract_name_claim("ผมหิวครับ")
+    >>> extract_name_claim("เดชครับ", expecting_name=True)
+    'เดช'
     """
     if not text:
         return None
@@ -156,6 +217,16 @@ def extract_name_claim(text: str) -> str | None:
             name = _clean_name(match.group(1))
             if name:
                 return name
+
+    if expecting_name:
+        stripped = text.strip()
+        # คำตอบต้องสั้นและเป็นคำเดียว ไม่งั้นน่าจะเป็นประโยคอื่นที่พูดต่อ
+        if len(stripped) <= 24 and len(stripped.split()) <= 2:
+            candidate = _clean_name(stripped.replace(" ", ""))
+            # คำตอบสั้น ๆ ส่วนใหญ่ไม่ใช่ชื่อ ("ครับ" "ขอโทษ" "ไม่บอก")
+            # _clean_name กรองให้ชั้นหนึ่งแล้ว ตรวจซ้ำหลังตัดคำลงท้ายอีกที
+            if candidate and candidate.lower() not in _NOT_A_NAME_ANSWERS:
+                return candidate
     return None
 
 
@@ -340,6 +411,27 @@ class SpeakerIdentifier:
             speaker=None, score=best_score, runner_up=runner_up, is_new=True, method="voice"
         )
 
+    def _is_different_person(
+        self, speaker: Speaker, pcm: bytes | None, sample_rate: int
+    ) -> bool:
+        """เสียงที่ได้ยินตอนนี้ขัดกับลายเสียงของคนที่ชื่อนี้หรือเปล่า
+
+        ตอบ ``True`` เฉพาะเมื่อมีหลักฐานชัดว่าเป็นคนละคน คือมีทั้งเสียงตัวอย่าง
+        และลายเสียงเดิมให้เทียบ แล้วความคล้ายต่ำกว่าเกณฑ์อย่างมีนัย
+        """
+        if pcm is None or not self.enabled:
+            return False
+        stored = self.store.voiceprint_for(speaker.id, self.backend_name)
+        if stored is None:
+            return False
+        try:
+            assert self.embedder is not None
+            current = self.embedder.embed(pcm, sample_rate)
+        except Exception:
+            return False
+        # เผื่อระยะห่างจากเกณฑ์ไว้ ไม่ตัดสินว่าคนละคนจากความต่างเพียงเล็กน้อย
+        return cosine_similarity(current, stored) < (self.threshold - self.margin)
+
     def enroll(
         self,
         speaker: Speaker,
@@ -362,7 +454,7 @@ class SpeakerIdentifier:
         sample_rate: int,
         transcript: str,
         *,
-        default_name: str = "ผู้ใช้ใหม่",
+        expecting_name: bool = False,
     ) -> Identification:
         """ระบุตัวตนโดยใช้ทั้งเสียงและเนื้อความ
 
@@ -379,11 +471,13 @@ class SpeakerIdentifier:
             if ident.confident:
                 return ident
 
-        claimed = extract_name_claim(transcript)
+        claimed = extract_name_claim(transcript, expecting_name=expecting_name)
         if claimed:
             speaker = self.store.find_speaker_by_name(claimed)
-            created = speaker is None
-            if speaker is None:
+            if speaker is not None and self._is_different_person(speaker, pcm, sample_rate):
+                # ชื่อซ้ำกันแต่เสียงไม่ใช่คนเดิม — "สมชาย" มีได้หลายคน
+                # ถ้ายุบเป็นคนเดียวกัน คนที่สองจะได้อ่านความจำของคนแรก
+                # และลายเสียงของทั้งคู่จะถูกเฉลี่ยรวมกันจนจำใครไม่ได้เลย
                 from .thai_text import detect_particle, particle_for_gender
 
                 gender = detect_particle(transcript)
@@ -391,8 +485,24 @@ class SpeakerIdentifier:
                     claimed,
                     gender=gender,
                     particle=particle_for_gender(gender),
+                    allow_duplicate_name=True,
+                )
+                if pcm is not None and self.enabled:
+                    self.enroll(speaker, pcm, sample_rate)
+                return Identification(speaker=speaker, is_new=True, method="name")
+            if speaker is None:
+                from .thai_text import detect_particle, particle_for_gender
+
+                gender = detect_particle(transcript)
+                # ต้องใช้ get_or_create ไม่ใช่ create ตรง ๆ ไม่งั้นคำขอที่แข่งกัน
+                # สร้างชื่อเดียวกันพร้อมกันจะชน UNIQUE index แล้วกลายเป็น 500
+                speaker, created = self.store.get_or_create_speaker(
+                    claimed,
+                    gender=gender,
+                    particle=particle_for_gender(gender),
                 )
             else:
+                created = False
                 self.store.touch_speaker(speaker.id)
             if pcm is not None and self.enabled:
                 self.enroll(speaker, pcm, sample_rate)

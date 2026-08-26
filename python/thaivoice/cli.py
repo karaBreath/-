@@ -148,10 +148,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         detail = "ติดตั้ง pythainlp แล้วแต่ไม่มี engine ที่ใช้ได้ — ใช้กฎสำรองอยู่"
     else:
         detail = "ใช้กฎสำรอง (ยังทำงานได้)"
+    from .thai_text import thai_word_tokenizer_available
+
+    tokenizer = thai_word_tokenizer_available(force_probe=True)
     line(
-        "ตัดประโยคไทย",
-        engine is not None,
-        detail,
+        "ตัดคำ/ตัดประโยคไทย",
+        engine is not None or tokenizer,
+        detail + (" · ตัดคำได้" if tokenizer else " · ไม่มีตัวตัดคำ"),
         "pip install 'thaivoice[thai]'  (ต้องมี python-crfsuite ด้วย)",
     )
 
@@ -197,7 +200,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                     who = event.speaker.call_name if event.speaker else "ยังไม่รู้จัก"
                     method = event.identification.method if event.identification else "-"
                     _p(f"{DIM}[ผู้พูด: {who} · วิธีระบุ: {method}]{RESET}")
-                    print(f"{GREEN}บอท:{RESET} ", end="", flush=True)
+                    print(f"{GREEN}{settings.assistant_name}:{RESET} ", end="", flush=True)
                 elif event.type == "delta":
                     print(event.text, end="", flush=True)
                 elif event.type == "chunk" and player and event.speech and event.speech.audio:
@@ -205,7 +208,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 elif event.type == "done":
                     _p("\n")
     except KeyboardInterrupt:
-        _p(f"\n{DIM}ลาก่อน{settings.assistant_particle}{RESET}")
+        _p(f"\n{DIM}ไว้คุยกันใหม่{settings.assistant_particle}{RESET}")
     finally:
         _close(session)
     return 0
@@ -248,7 +251,7 @@ def cmd_talk(args: argparse.Namespace) -> int:
             started = time.time()
             result = stt.transcribe(pcm, settings.sample_rate)
             if not result:
-                _p(f"{DIM}(ไม่ได้ยินเป็นคำพูด){RESET}")
+                _p(f"{DIM}(ฟังไม่ออกว่าพูดว่าอะไร){RESET}")
                 continue
             _p(f"{CYAN}คุณ:{RESET} {result.text} {DIM}({time.time() - started:.1f} วิ){RESET}")
 
@@ -261,7 +264,7 @@ def cmd_talk(args: argparse.Namespace) -> int:
                     _p(f"{DIM}[ผู้พูด: {who}{detail}]{RESET}")
                 elif event.type == "delta":
                     if not printed:
-                        print(f"{GREEN}บอท:{RESET} ", end="", flush=True)
+                        print(f"{GREEN}{settings.assistant_name}:{RESET} ", end="", flush=True)
                         printed = True
                     print(event.text, end="", flush=True)
                 elif event.type == "chunk" and event.speech and event.speech.audio:
@@ -269,7 +272,7 @@ def cmd_talk(args: argparse.Namespace) -> int:
                 elif event.type == "done":
                     _p("\n")
     except KeyboardInterrupt:
-        _p(f"\n{DIM}ลาก่อน{settings.assistant_particle}{RESET}")
+        _p(f"\n{DIM}ไว้คุยกันใหม่{settings.assistant_particle}{RESET}")
     finally:
         mic.stop()
         player.stop()
@@ -287,7 +290,7 @@ def cmd_speakers(args: argparse.Namespace) -> int:
         return 0
     header = (
         _pad("id", 5) + _pad("ชื่อ", 20) + _pad("คำลงท้าย", 12)
-        + _pad("เทิร์น", 9) + _pad("ความจำ", 9) + "เจอล่าสุด"
+        + _pad("ข้อความ", 9) + _pad("ความจำ", 9) + "เจอล่าสุด"
     )
     _p(f"{BOLD}{header}{RESET}")
     now = time.time()
@@ -319,7 +322,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
     _p(f"{BOLD}{speaker.call_name}{RESET} {DIM}(id={speaker.id}){RESET}")
     _p(f"  ชื่อเต็ม: {speaker.display_name}")
     _p(f"  คำลงท้าย: {speaker.particle or '-'} · เพศที่เดาไว้: {speaker.gender or '-'}")
-    _p(f"  คุยกันมาแล้ว {stats.turns} เทิร์น · จำข้อเท็จจริงไว้ {stats.facts} ข้อ")
+    _p(f"  คุยกันมาแล้ว {stats.turns} ข้อความ · จำข้อเท็จจริงไว้ {stats.facts} ข้อ")
     _p(f"  ลายเสียง: {'มี' if store.has_voiceprint(speaker.id, 'resemblyzer') else 'ยังไม่มี'}")
 
     facts = store.facts_for(speaker.id)
@@ -334,8 +337,9 @@ def cmd_memory(args: argparse.Namespace) -> int:
 
     if args.turns:
         _p(f"\n{BOLD}บทสนทนาล่าสุด{RESET}")
+        assistant_name = get_settings().assistant_name
         for turn in store.recent_turns(speaker.id, limit=args.turns):
-            who = "คุณ" if turn.role == "user" else "บอท"
+            who = "คุณ" if turn.role == "user" else assistant_name
             _p(f"  {who}: {turn.content}")
     store.close()
     return 0
@@ -432,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     memory = sub.add_parser("memory", help="ดูความจำของคนคนหนึ่ง")
     memory.add_argument("speaker_id", type=int)
-    memory.add_argument("--turns", type=int, default=0, help="แสดงบทสนทนาล่าสุดกี่เทิร์น")
+    memory.add_argument("--turns", type=int, default=0, help="แสดงบทสนทนาล่าสุดกี่ข้อความ")
     memory.set_defaults(func=cmd_memory)
 
     enroll = sub.add_parser("enroll", help="สอนให้จำเสียงคนใหม่จากไฟล์ WAV")

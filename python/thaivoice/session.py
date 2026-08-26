@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Sequence
 
@@ -28,6 +29,10 @@ from .thai_text import detect_particle, particle_for_gender
 from .tts import Speech, TextToSpeech
 
 log = logging.getLogger("thaivoice.session")
+
+# คำขอลบความจำต้องยืนยันภายในเวลานี้ ไม่งั้นถือว่าเลิกล้ม
+# ป้องกันคำว่า "ยืนยัน" ที่พูดขึ้นมาลอย ๆ อีกครึ่งชั่วโมงต่อมาไปลบข้อมูลทิ้ง
+FORGET_CONFIRM_TIMEOUT = 120.0
 
 __all__ = [
     "ConversationSession",
@@ -63,20 +68,53 @@ _FORGET_EN = re.compile(
 # คำห้าม/คำปฏิเสธที่อยู่ "ก่อน" คำกริยา แปลว่าผู้ใช้สั่งไม่ให้ลบ
 _NEGATOR_BEFORE = re.compile(r"(?:อย่าเพิ่ง|อย่า|ไม่ต้อง|ห้าม|ยังไม่)\s*$")
 # ประโยคคำถามไม่ใช่คำสั่ง — "ลบข้อมูลยังไง" คือขอวิธี ไม่ใช่ขอให้ลบ
-_QUESTION_MARKER = re.compile(r"(?:ยังไง|อย่างไร|วิธี|ไหม|มั้ย|หรือเปล่า|เหรอ|ทำไม)")
+_QUESTION_MARKER = re.compile(
+    r"(?:ยังไง|ทำไง|ยังงัย|อย่างไร|วิธี|ไหม|มั้ย|หรือเปล่า|เหรอ|ทำไม|ไง\b)"
+)
 # "ผมลืม..." คือผู้พูดลืมเอง ไม่ใช่สั่งให้ระบบลืม
 _FIRST_PERSON_FORGOT = re.compile(_SELF + r"\s*(?:ก็|เลย)?\s*ลืม")
 
+# บอทเพิ่งถามชื่อไปหรือเปล่า — ตรวจจากข้อความที่ *เราเอง* พูด จึงเชื่อถือได้
+# ใช้เพื่อยอมรับคำตอบสั้น ๆ อย่าง "เดช" ว่าเป็นชื่อ ซึ่งเป็นการเดาที่ปลอดภัย
+# เพราะเรารู้ว่าเราเพิ่งถามอะไรไป
+# ตั้งใจให้แคบมาก — ครอบเฉพาะสำนวนที่เราสั่งให้บอทใช้ถามชื่อคู่สนทนาเท่านั้น
+# ของเดิมจับคำว่า "ชื่ออะไร" ลอย ๆ ซึ่งติดกับคำถามอย่าง "หมาคุณชื่ออะไรคะ" หรือ
+# "ร้านนั้นชื่ออะไรคะ" ด้วย พอติดแล้วคำตอบสั้น ๆ ของผู้ใช้จะถูกตีความเป็นชื่อเขาเอง
+_ASKED_FOR_NAME = re.compile(
+    r"(?:เรียก(?:คุณ|ผม|ฉัน|หนู)?ว่าอะไร"
+    r"|เรียกว่าอะไรดี"
+    r"|ขอทราบชื่อ"
+    r"|ขอชื่อ"
+    r"|คุณชื่ออะไร"
+    r"|ยังไม่ทราบชื่อ"
+    r"|แนะนำตัว)"
+)
+
 # หมายเหตุ: ห้ามใช้ \b กับคำไทย เพราะคำไทยจำนวนมากลงท้ายด้วยวรรณยุกต์ (เช่น "ใช่"
 # "ไม่") ซึ่งเป็นอักขระผสมที่ Python ไม่นับเป็น word character ทำให้ \b ไม่ match
-# จึงใช้การยึดต้นข้อความแทน
+# จึงใช้การยึดต้นและท้ายข้อความแทน
+#
+# คำ "ตอบรับ" ต้องตรงทั้งประโยค ไม่ใช่แค่ขึ้นต้น เพราะมันไปสั่งลบข้อมูลที่เอากลับ
+# ไม่ได้ ถ้าจับแค่ต้นประโยค คำสั่งอย่าง "ลบข้อความล่าสุด" หรือ "ใช่ไหมว่าต้องทำ
+# แบบนี้" จะกลายเป็นการยืนยันลบความจำทั้งหมด
+_AFFIRMATIVE_TAIL = r"(?:ครับผม|ครับ|ค่ะ|คะ|เลย|นะ|แล้ว|แหละ|สิ|ล่ะ|จ้า|\.|!)*"
 _AFFIRMATIVE = re.compile(
-    r"^\s*(?:ใช่|ยืนยัน|ลบเลย|ลบ|เอาเลย|เอาสิ|เอา|ตกลง|โอเค|โอเก|จัดไป)"
-    r"|^\s*(?:yes|yeah|yep|y|ok|okay|confirm|sure)\b",
+    # ตั้งใจ *ไม่* รับ "ครับ"/"ค่ะ" เดี่ยว ๆ แม้จะเป็นวิธีตอบรับที่คนไทยใช้บ่อยที่สุด
+    # เพราะมันเป็นคำรับคำทั่วไปที่พูดแทรกได้ตลอด และระบบถอดเสียงก็มักแถมคำลงท้าย
+    # ห้อยท้ายมาเอง ด่านนี้เป็นด่านสุดท้ายก่อนลบข้อมูลถาวร จึงต้องขอคำที่ชัดเจน
+    # ซึ่งเป็นคำเดียวกับที่บอทบอกให้พูด
+    r"^\s*(?:ใช่|ยืนยัน|ลบเลย|ลบได้เลย|ลบ|เอาเลย|เอาสิ|ตกลง|โอเค|โอเก|จัดไป|"
+    r"แน่ใจ|ได้เลย|ทำเลย|จัดการเลย|ลุยเลย|"
+    r"yes|yeah|yep|y|ok|okay|confirm|sure)"
+    r"\s*" + _AFFIRMATIVE_TAIL + r"\s*$",
     re.IGNORECASE,
 )
+
+# คำ "ปฏิเสธ" จับแค่ขึ้นต้นก็พอ เพราะการเข้าใจผิดว่าปฏิเสธแปลว่าไม่ลบ
+# ซึ่งเป็นทางที่ปลอดภัยกว่าเสมอ
 _NEGATIVE = re.compile(
-    r"^\s*(?:ไม่|อย่า|ยกเลิก|พอ|หยุด|เดี๋ยวก่อน|ยัง)"
+    r"^\s*(?:ไม่|อย่า|ยกเลิก|พอ|หยุด|เดี๋ยวก่อน|ยัง|แป๊บ|ขอคิด|ไว้ก่อน|"
+    r"เปลี่ยนใจ|ทีหลัง|ช้าก่อน)"
     r"|^\s*(?:no|nope|cancel|stop|wait)\b",
     re.IGNORECASE,
 )
@@ -109,6 +147,20 @@ def detect_forget_all(text: str) -> bool:
     if _NEGATOR_BEFORE.search(text[: match.start()]):
         return False
     return True
+
+
+# คำนำหน้าที่แปลว่าชื่อนั้นมีคำเรียกอยู่แล้ว ไม่ต้องเติม "คุณ" ซ้ำ
+_HAS_TITLE = ("คุณ", "พี่", "น้อง", "นาย", "นาง", "นางสาว", "น้า", "ป้า", "ลุง", "อา")
+
+
+def _address(name: str) -> str:
+    """เติม "คุณ" นำหน้าชื่อ เว้นแต่ชื่อนั้นมีคำเรียกอยู่แล้ว (กัน "คุณพี่เดช")"""
+    return name if name.startswith(_HAS_TITLE) else f"คุณ{name}"
+
+
+def _soft(particle: str) -> str:
+    """รูปของคำลงท้ายเมื่อตามหลัง "นะ" — ภาษาไทยใช้ "นะคะ" ไม่ใช่ "นะค่ะ" """
+    return "คะ" if particle == "ค่ะ" else particle
 
 
 def is_affirmative(text: str) -> bool | None:
@@ -181,8 +233,11 @@ class ConversationSession:
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.sticky_speaker = sticky_speaker
         self.current_speaker: Speaker | None = None
-        # id ของคนที่ขอลบความจำและกำลังรอการยืนยัน
+        # id ของคนที่ขอลบความจำและกำลังรอการยืนยัน พร้อมเวลาที่ขอ
         self._pending_forget: int | None = None
+        self._pending_forget_at: float = 0.0
+        # เทิร์นก่อนหน้าบอทถามชื่อไปหรือเปล่า
+        self._asked_for_name = False
 
     # ── ระบุตัวผู้พูด ───────────────────────────────────────────────────
     def identify(
@@ -190,7 +245,9 @@ class ConversationSession:
     ) -> Identification:
         """หาว่าใครพูดประโยคนี้ และอัปเดตคำลงท้ายที่คนนั้นใช้"""
         rate = sample_rate or self.settings.sample_rate
-        ident = self.identifier.resolve(pcm, rate, transcript)
+        ident = self.identifier.resolve(
+            pcm, rate, transcript, expecting_name=self._asked_for_name
+        )
 
         if ident.speaker is None and pcm is None and self.sticky_speaker:
             # ไม่มีเสียงให้เทียบ (เช่นพิมพ์เข้ามา) — ถือว่ายังเป็นคนเดิมในบทสนทนานี้
@@ -304,6 +361,7 @@ class ConversationSession:
             elif event.type == "done":
                 reply = event.text
 
+        self._note_assistant_reply(reply)
         if speaker is not None and reply:
             self.store.record_turn(speaker.id, self.session_id, "assistant", reply)
             self._remember(speaker)
@@ -346,24 +404,43 @@ class ConversationSession:
         # กำลังรอยืนยันอยู่
         if self._pending_forget is not None:
             pending_id = self._pending_forget
+            expired = time.time() - self._pending_forget_at > FORGET_CONFIRM_TIMEOUT
+            same_person = speaker is not None and speaker.id == pending_id
+            if expired:
+                self._pending_forget = None
+                return None
+            if not same_person:
+                # คนอื่นพูดขึ้นมาระหว่างรอ — ไม่ยกเลิกคำขอของเจ้าตัว
+                return None
             answer = is_affirmative(transcript)
-            if answer is True and speaker is not None and speaker.id == pending_id:
+            if answer is True:
                 self._pending_forget = None
                 removed = self.store.forget_everything(speaker.id)
                 log.info("ลบความจำของ speaker %s: %s", speaker.id, removed)
-                total = sum(removed.values())
                 return self._say(
-                    f"ลบความจำทั้งหมดแล้ว{particle} "
-                    f"ลบไป {total} รายการ ทั้งสิ่งที่จำไว้ บทสรุป และบทสนทนาเก่า "
+                    f"ลบให้เรียบร้อยแล้ว{particle} "
+                    f"สิ่งที่จำไว้ {removed['facts']} เรื่อง "
+                    f"บทสรุป {removed['summaries']} ชุด "
+                    f"และบทสนทนาเก่า {removed['turns']} ข้อความ "
                     f"เริ่มรู้จักกันใหม่ได้เลย{particle}",
                     speaker,
                     speak,
                 )
             self._pending_forget = None
             if answer is False:
-                return self._say(f"ได้{particle} ไม่ลบให้{particle}", speaker, speak)
-            # ตอบเป็นอย่างอื่น -> ถือว่าไม่ยืนยัน แล้วคุยต่อตามปกติ
-            return None
+                return self._say(
+                    f"ได้{particle} งั้นไม่ลบนะ{_soft(particle)} ความจำทั้งหมดยังอยู่ครบ",
+                    speaker,
+                    speak,
+                )
+            # ตอบเป็นอย่างอื่น -> ยังไม่ลบ และบอกให้ชัดว่าไม่ได้ลบอะไร
+            # ของเดิมเงียบแล้วไปคุยเรื่องอื่นต่อ ผู้ใช้จึงไม่รู้ว่าตกลงลบหรือยัง
+            return self._say(
+                f'ยังไม่ได้ลบอะไรนะ{_soft(particle)} ถ้าจะลบจริง ๆ พูดว่า "ยืนยัน" '
+                f"ได้เลย{particle}",
+                speaker,
+                speak,
+            )
 
         if not detect_forget_all(transcript):
             return None
@@ -371,18 +448,20 @@ class ConversationSession:
         if speaker is None:
             # ตอบตามจริง ดีกว่ารับปากแล้วไม่ได้ลบอะไรเลย
             return self._say(
-                f"ตอนนี้ยังไม่รู้ว่าคุยอยู่กับใคร เลยยังไม่มีความจำอะไรเก็บไว้{particle} "
-                f"ไม่มีอะไรต้องลบ{particle}",
+                f"ตอนนี้ยังไม่รู้ว่าคุยอยู่กับใคร เลยยังไม่มีความจำอะไรให้ลบ{particle}",
                 None,
                 speak,
             )
 
         self._pending_forget = speaker.id
+        self._pending_forget_at = time.time()
         stats = self.store.stats(speaker.id)
         return self._say(
-            f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับคุณ{speaker.call_name}ทั้งหมด "
-            f"ทั้งสิ่งที่จำไว้ {stats.facts} เรื่อง และบทสนทนา {stats.turns} เทิร์น "
-            f"ลบแล้วเอากลับไม่ได้ ถ้าแน่ใจให้พูดว่า ยืนยัน{particle}",
+            f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}ทั้งหมด "
+            f"ทั้งสิ่งที่จำไว้ {stats.facts} เรื่อง และบทสนทนา {stats.turns} ข้อความ "
+            f"ลบแล้วกู้คืนไม่ได้ "
+            f"ส่วนเสียงที่ใช้จำว่าเป็นคุณจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี "
+            f'ถ้าแน่ใจ พูดว่า "ยืนยัน" ได้เลย{particle}',
             speaker,
             speak,
         )
@@ -393,6 +472,7 @@ class ConversationSession:
         """ตอบข้อความที่ระบบเขียนเอง (ไม่ผ่านโมเดล) และบันทึกลงบทสนทนา"""
 
         def generate() -> Iterator[SessionEvent]:
+            self._note_assistant_reply(text)
             if speaker is not None and self.store.speaker_exists(speaker.id):
                 self.store.record_turn(speaker.id, self.session_id, "assistant", text)
             yield SessionEvent(
@@ -404,6 +484,10 @@ class ConversationSession:
             yield SessionEvent("done", text=text, speaker=speaker)
 
         return generate()
+
+    def _note_assistant_reply(self, reply: str) -> None:
+        """จำไว้ว่าเทิร์นนี้บอทถามชื่อหรือเปล่า เพื่อใช้ตีความคำตอบเทิร์นถัดไป"""
+        self._asked_for_name = bool(reply) and bool(_ASKED_FOR_NAME.search(reply))
 
     def _speak(self, text: str) -> Speech | None:
         if self.tts is None or not text.strip():

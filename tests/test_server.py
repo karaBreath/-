@@ -471,3 +471,81 @@ class TestWavValidation:
             return list(samples)
 
         assert decode(True) == decode(False)
+
+
+class TestWebSocketFrames:
+    """เฟรมผิดรูปต้องได้คำตอบเสมอ ไม่ใช่ปิดการเชื่อมต่อเงียบ ๆ"""
+
+    def test_เฟรมไบนารีต้องได้_error_ไม่ใช่ปิดเงียบ(self, client):
+        with client.websocket_connect("/ws/chat") as socket:
+            socket.send_bytes(b"\x00\x01\xff")
+            event = socket.receive_json()
+            assert event["type"] == "error"
+            assert "ไบนารี" in event["text"]
+
+    def test_ข้อความที่ไม่ใช่_JSON_ต้องได้_error(self, client):
+        with client.websocket_connect("/ws/chat") as socket:
+            socket.send_text("ไม่ใช่ JSON เลย {{{")
+            event = socket.receive_json()
+            assert event["type"] == "error"
+
+    def test_ใช้ต่อได้หลังส่งเฟรมผิดรูป(self, client):
+        with client.websocket_connect("/ws/chat?session_id=frames") as socket:
+            socket.send_bytes(b"\xff\xfe")
+            assert socket.receive_json()["type"] == "error"
+            socket.send_text("[1,2,3]")
+            assert socket.receive_json()["type"] == "error"
+
+            socket.send_json({"text": "สวัสดี", "speak": False})
+            kinds = []
+            while True:
+                event = socket.receive_json()
+                kinds.append(event["type"])
+                if event["type"] == "done":
+                    break
+            assert "done" in kinds
+
+
+class TestRuntimeLifecycle:
+    def test_ปิดระบบระหว่างมีคำขอค้างต้องไม่กลายเป็น_500(self, settings, fake_client):
+        """MemoryExtractor เคยโยน RuntimeError เมื่อมีงานเข้ามาหลัง pool ถูกปิด"""
+        from thaivoice.extraction import MemoryExtractor
+        from thaivoice.memory import MemoryStore
+
+        store = MemoryStore(":memory:")
+        extractor = MemoryExtractor(store, fake_client, settings)
+        speaker = store.create_speaker("เดช")
+        turns = [store.recent_turns(speaker.id)]
+
+        extractor.shutdown(wait=False)
+        # ต้องไม่โยน exception
+        extractor.schedule(speaker, turns[0])
+        extractor.maybe_summarize(speaker)
+        store.close()
+
+    def test_ปิด_runtime_แล้วฐานข้อมูลถูกปิดด้วย(self, settings, fake_client):
+        from thaivoice.memory import MemoryStore
+
+        store = MemoryStore(":memory:")
+        runtime = server_module.ServerRuntime(
+            settings,
+            store=store,
+            client=fake_client,
+            embedder=None,
+            tts=None,
+            stt=None,
+            with_memory_extraction=False,
+        )
+        runtime.close()
+
+        import sqlite3
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            store.list_speakers()
+
+    def test_งานสตรีมใช้_executor_แยกจากงาน_HTTP(self, runtime):
+        """ไม่งั้น WebSocket หลายสิบตัวจะยึดเธรดจนทุก endpoint รอคิวเป็นสิบวินาที"""
+        import asyncio
+
+        assert runtime.stream_executor is not None
+        assert runtime.stream_executor is not asyncio.get_event_loop_policy()

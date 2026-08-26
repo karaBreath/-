@@ -75,7 +75,16 @@ export class ThaiVoiceClient {
   constructor(options: ClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
     this.sessionId = options.sessionId;
-    this.fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+    if (typeof fetchImpl !== "function") {
+      // lib.dom ประกาศ fetch เป็น non-nullable ทั้งที่สภาพแวดล้อมจริงอาจไม่มี
+      // ถ้าไม่ดักตรงนี้ ทุกเมธอดจะพังด้วย "this.fetchImpl is not a function"
+      throw new ThaiVoiceError(
+        "สภาพแวดล้อมนี้ไม่มี fetch — ใช้ Node 18 ขึ้นไป หรือส่ง fetchImpl เข้ามาตอนสร้าง client",
+        0,
+      );
+    }
+    this.fetchImpl = fetchImpl;
     this.webSocketImpl =
       options.webSocketImpl ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
   }
