@@ -287,11 +287,17 @@ export class ThaiVoiceClient {
     ready.catch(() => {});
 
     socket.addEventListener("message", (event) => {
+      // จับเฉพาะ JSON.parse — ห้ามครอบ onEvent ด้วย
+      //
+      // ของเดิมกลืน exception ที่หลุดออกมาจากตัวจัดการของผู้เรียกไปเงียบ ๆ
+      // สถานะฝั่งนั้นจึงค้างกลางคัน โดยไม่มีอะไรรายงานที่ไหนเลย
+      let parsed: StreamEvent;
       try {
-        handlers.onEvent?.(JSON.parse(String((event as MessageEvent).data)) as StreamEvent);
+        parsed = JSON.parse(String((event as MessageEvent).data)) as StreamEvent;
       } catch {
-        // ข้ามข้อความที่ไม่ใช่ JSON
+        return; // ข้ามข้อความที่ไม่ใช่ JSON
       }
+      handlers.onEvent?.(parsed);
     });
     socket.addEventListener("close", () => handlers.onClose?.());
 

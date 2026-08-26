@@ -791,3 +791,155 @@ describe("VoiceConversation — บัคที่เจอจากการต
     talk.stop();
   });
 });
+
+describe("VoiceConversation — บัคที่เจอจากการตรวจรอบห้า", () => {
+  const client = () => new ThaiVoiceClient({ baseUrl: "http://x", sessionId: "t" });
+
+  async function started(options = {}) {
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      ...options,
+    });
+    await talk.start();
+    return { talk, recognition: FakeSpeechRecognition.instances.at(-1) };
+  }
+
+  test("กดหยุดแล้วประโยคที่ค้างอยู่ต้องไม่ถูกส่งขึ้นเซิร์ฟเวอร์", async () => {
+    // งาน asynchronous ที่ค้างอยู่ตอนกดหยุดไม่มีทางรู้ว่าบทสนทนาจบไปแล้ว
+    // มันจึงเปิด socket ใหม่ที่ไม่มีใครปิดอีกเลย แล้วส่งเสียงและข้อความออกไป
+    FakeWebSocket.openDelay = 40;
+    const { talk, recognition } = await started();
+
+    recognition.emitFinal("ความลับของฉัน");
+    await sleep(5);
+    talk.stop(); // กดหยุดระหว่างกำลังเชื่อมต่อ
+    await sleep(120);
+
+    const sent = FakeWebSocket.instances.flatMap((s) => s.sent.map((m) => m.text));
+    assert.deepEqual(sent, [], `ส่งออกไปหลังกดหยุด: ${JSON.stringify(sent)}`);
+    const open = FakeWebSocket.instances.filter((s) => s.readyState === 1);
+    assert.equal(open.length, 0, "socket ต้องไม่ค้างเปิดไว้");
+  });
+
+  test("พูดแทรกตอนบอทยังไม่ได้ตอบอะไรเลยต้องไม่ทิ้งคำตอบ", async () => {
+    // Chrome ยิง speechstart เมื่อมีเสียงอะไรก็ได้ ลมหายใจหรือเสียงรอบข้าง
+    // จึงทิ้งคำตอบทั้งอันโดยที่ผู้ใช้ไม่ได้อะไรกลับมาเลย
+    const replies = [];
+    const { talk, recognition } = await started({
+      bargeIn: true,
+      onReply: (t) => replies.push(t),
+    });
+
+    recognition.emitFinal("อากาศวันนี้เป็นยังไง");
+    await sleep(30);
+    recognition.onspeechstart(); // เสียงรอบข้าง ก่อนบอทเริ่มตอบ
+    await sleep(10);
+
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "done", text: "วันนี้แดดออกค่ะ" });
+    await sleep(40);
+
+    assert.deepEqual(replies, ["วันนี้แดดออกค่ะ"], "คำตอบต้องไม่ถูกกลืน");
+    talk.stop();
+  });
+
+  test("เปิดไมค์กลับมาต้องทิ้งเสียงที่อัดไว้ระหว่างบอทพูด", async () => {
+    // การพักตัวถอดเสียงไม่ได้หยุดตัวอัดเสียง เสียง TTS ที่สะท้อนเข้าไมค์
+    // จึงถูกอัปโหลดไปเป็นลายเสียงของผู้ใช้
+    const { talk, recognition } = await started({ bargeIn: false });
+    let ล้างแล้ว = 0;
+    talk.recorder = {
+      take: () => null,
+      reset: () => {
+        ล้างแล้ว += 1;
+      },
+      stop: async () => null,
+    };
+
+    recognition.emitFinal("ถาม");
+    await sleep(30);
+    FakeWebSocket.instances[0].emit({ type: "done", text: "ตอบ" });
+    await sleep(40);
+
+    assert.ok(ล้างแล้ว >= 1, "ต้องล้างบัฟเฟอร์เสียงก่อนเปิดไมค์กลับมา");
+    talk.stop();
+  });
+
+  test("ตัวจัดการที่โยน error ต้องไม่ทำให้บทสนทนาค้างถาวร", async () => {
+    // สถานะที่ต้องคืนอยู่นอกบริเวณที่ try ครอบ ทั้งคิวการส่งและ maybeFinish
+    let พังแล้ว = false;
+    const { talk, recognition } = await started({
+      onReply: () => {
+        if (!พังแล้ว) {
+          พังแล้ว = true;
+          throw new Error("ตัวจัดการพัง");
+        }
+      },
+    });
+
+    recognition.emitFinal("หนึ่ง");
+    await sleep(30);
+    // ตัวจัดการที่โยนต้องไม่ถูกกลืน — ผู้เรียกต้องเห็น แต่บทสนทนาต้องไม่ค้าง
+    assert.throws(() =>
+      FakeWebSocket.instances[0].emit({ type: "done", text: "ตอบหนึ่ง" }),
+    );
+    await sleep(40);
+
+    assert.equal(talk.currentState, "listening", "ต้องไม่ค้างที่ 'กำลังคิด'");
+
+    recognition.emitFinal("สอง");
+    await sleep(40);
+    const sent = FakeWebSocket.instances.flatMap((s) => s.sent.map((m) => m.text));
+    assert.deepEqual(sent, ["หนึ่ง", "สอง"], "ประโยคถัดไปต้องยังส่งได้");
+    talk.stop();
+  });
+
+  test("การเชื่อมต่อที่ค้างไม่จบต้องไม่ทำให้ทุกประโยคหลังจากนั้นเงียบ", async () => {
+    // ของเดิมไม่มีเพดานเวลา คิวการส่งจึงค้างตลอดไป ข้ามการกดหยุด-เริ่มใหม่ด้วย
+    const errors = [];
+    FakeWebSocket.openDelay = 60_000; // จับมือไม่จบ
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      connectTimeoutMs: 30,
+      onError: (e) => errors.push(e.message),
+    });
+    await talk.start();
+    const first = FakeSpeechRecognition.instances.at(-1);
+    first.emitFinal("ประโยคที่หาย");
+    await sleep(20);
+
+    // ไม่กดหยุด — พูดประโยคใหม่ในบทสนทนาเดิมเลย ซึ่งเป็นสิ่งที่ผู้ใช้ทำจริง
+    FakeWebSocket.openDelay = 5;
+    await sleep(60); // ปล่อยให้เพดานเวลาทำงาน
+    first.emitFinal("ประโยคใหม่");
+    await sleep(60);
+
+    const sent = FakeWebSocket.instances.flatMap((s) => s.sent.map((m) => m.text));
+    assert.deepEqual(sent, ["ประโยคใหม่"], "ประโยคใหม่ต้องส่งได้");
+    assert.ok(errors.length >= 1, "ต้องบอกผู้ใช้ว่าเชื่อมต่อไม่สำเร็จ");
+
+    FakeWebSocket.instances.at(-1).emit({ type: "done", text: "ตอบ" });
+    await sleep(40);
+    assert.equal(talk.currentState, "listening");
+    talk.stop();
+  });
+
+  test("พูดแทรกต้องเปิดไมค์กลับมา", async () => {
+    const { talk, recognition } = await started({ bargeIn: false });
+    recognition.emitFinal("ถาม");
+    await sleep(30);
+    const socket = FakeWebSocket.instances[0];
+    socket.emit({ type: "delta", text: "กำลังตอบ" });
+    socket.emit({ type: "chunk", text: "กำลังตอบ", audio: "QUFB" });
+    await sleep(10);
+
+    talk.interrupt();
+    await sleep(20);
+
+    assert.equal(talk.currentState, "listening");
+    assert.equal(recognition.running, true, "บอกว่าฟังอยู่ก็ต้องเปิดไมค์จริง");
+    talk.stop();
+  });
+});

@@ -124,10 +124,13 @@ export class FakeWebSocket {
     this.sent = [];
     this._listeners = {};
     FakeWebSocket.instances.push(this);
-    setTimeout(() => {
+    // unref เพื่อให้ openDelay ที่ตั้งไว้นาน ๆ (จำลองการจับมือที่ค้าง)
+    // ไม่กันไม่ให้โปรเซสของเทสต์จบ
+    const timer = setTimeout(() => {
       this.readyState = 1; // OPEN
       this._fire("open", {});
     }, FakeWebSocket.openDelay);
+    timer.unref?.();
   }
 
   addEventListener(type, handler) {
