@@ -25,6 +25,7 @@
 import asyncio
 import base64
 import logging
+import time
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -120,6 +121,7 @@ class ServerRuntime:
         )
         self._sessions: "OrderedDict[str, ConversationSession]" = OrderedDict()
         self._lock = threading.Lock()
+        self.closed = False
         # executor แยกสำหรับงานสตรีมของ WebSocket
         #
         # ถ้าใช้ executor เริ่มต้นร่วมกับ asyncio.to_thread ของทุก endpoint
@@ -167,13 +169,34 @@ class ServerRuntime:
         with self._lock:
             return len(self._sessions)
 
-    def close(self) -> None:
-        if self.extractor is not None:
-            self.extractor.shutdown(wait=False)
-        self.stream_executor.shutdown(wait=False)
+    def close(self, *, timeout: float = 10.0) -> None:
+        """ปิดระบบให้เรียบร้อย — งานที่ค้างอยู่ต้องได้เขียนลงฐานข้อมูลก่อน
+
+        ของเดิมสั่ง ``shutdown(wait=False)`` แล้วปิด store ทันที เธรดที่กำลัง
+        เขียนอยู่จึงเจอ "Cannot operate on a closed database" ซึ่ง ``_safe_run``
+        กลืนทิ้ง ผลคือทุกครั้งที่ deploy ใหม่หรือได้ SIGTERM ข้อเท็จจริงที่เพิ่ง
+        สกัดจากบทสนทนาช่วงท้ายจะหายเงียบ ๆ และเทิร์นที่กำลังคุยอยู่ตายกลางคัน
+        """
         with self._lock:
+            self.closed = True
             self._sessions.clear()
+        deadline = time.monotonic() + timeout
+        if self.extractor is not None:
+            _join(self.extractor.shutdown, max(0.0, deadline - time.monotonic()))
+        _join(self.stream_executor.shutdown, max(0.0, deadline - time.monotonic()))
         self.store.close()
+
+
+def _join(shutdown: Any, timeout: float) -> None:
+    """เรียก ``shutdown(wait=True)`` แต่ไม่รอเกินเวลาที่กำหนด
+
+    ``ThreadPoolExecutor.shutdown`` ไม่มีพารามิเตอร์ timeout — ถ้าเรียกตรง ๆ
+    เซิร์ฟเวอร์ที่มีเทิร์นค้างอาจปิดไม่ลงเลย ถ้าใช้ ``wait=False`` งานที่กำลัง
+    เขียนอยู่ก็จะเจอฐานข้อมูลปิดไปแล้ว จึงรอแบบมีเพดาน
+    """
+    done = threading.Thread(target=shutdown, kwargs={"wait": True}, daemon=True)
+    done.start()
+    done.join(timeout)
 
 
 def _find_web_root() -> "Path | None":
@@ -314,6 +337,10 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
 
     @app.get("/health")
     def health() -> dict:
+        if runtime.closed:
+            # ระหว่างปิดตัว ต้องตอบว่าไม่พร้อม ไม่ใช่ระเบิดเป็น 500
+            # เพราะ load balancer ใช้ endpoint นี้ตัดสินว่าจะส่งคำขอมาต่อไหม
+            return {"ok": False, "closing": True, "model": settings.model}
         return {
             "ok": True,
             "model": settings.model,

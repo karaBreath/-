@@ -451,26 +451,75 @@ class SpeakerIdentifier:
             speaker=None, score=best_score, runner_up=runner_up, is_new=True, method="voice"
         )
 
-    def _is_different_person(
-        self, speaker: Speaker, pcm: bytes | None, sample_rate: int
-    ) -> bool:
-        """เสียงที่ได้ยินตอนนี้ขัดกับลายเสียงของคนที่ชื่อนี้หรือเปล่า
+    def _match_by_name(
+        self, claimed: str, pcm: bytes | None, sample_rate: int
+    ) -> tuple[Speaker | None, bool, bool]:
+        """เลือกว่า "สมชาย" ที่พูดอยู่ตอนนี้คือสมชายคนไหน
 
-        ตอบ ``True`` เฉพาะเมื่อมีหลักฐานชัดว่าเป็นคนละคน คือมีทั้งเสียงตัวอย่าง
-        และลายเสียงเดิมให้เทียบ แล้วความคล้ายต่ำกว่าเกณฑ์อย่างมีนัย
+        คืน ``(speaker, fork, sure)``
+
+        * ``speaker`` — คนที่ควรใช้ หรือ ``None`` ถ้ายังไม่มีใครชื่อนี้
+        * ``fork`` — มีคนชื่อนี้อยู่ แต่มีหลักฐานว่าเป็นคนละคน ต้องสร้างใหม่
+        * ``sure`` — มั่นใจพอจะเอาเสียงนี้ไปสะสมเป็นลายเสียงของเขาไหม
+
+        ของเดิมเทียบกับแถวเดียวที่ ``find_speaker_by_name`` คืนมา และตัดสินว่า
+        "คนละคน" จากตัวอย่างเสียงชิ้นเดียวที่ต่ำกว่า ``threshold - margin``
+        ผลคือเป็นหวัด เปลี่ยนไมค์ หรืออยู่ในที่เสียงดังครั้งเดียว ก็ถูกแยกเป็น
+        ตัวตนใหม่ ความจำหายหมด และแถวใหม่ได้กุญแจแยก จึงหาไม่เจออีกเลย
+        แถมยังสะสมแถวซ้ำไปเรื่อย ๆ เพราะไม่เคยเทียบกับแถวที่ชื่อซ้ำกันแถวอื่น
         """
+        candidates = self.store.find_speakers_by_name(claimed)
+        if not candidates:
+            return None, False, True
         if pcm is None or not self.enabled:
-            return False
-        stored = self.store.voiceprint_for(speaker.id, self.backend_name)
-        if stored is None:
-            return False
+            # ไม่มีเสียงให้เทียบ (เช่นคุยผ่านตัวหนังสือ) — ใช้คนที่เพิ่งคุยล่าสุด
+            # ยอมรับว่านี่คือช่องโหว่ที่แก้ด้วยข้อมูลเท่านี้ไม่ได้
+            return candidates[0], False, True
         try:
             assert self.embedder is not None
             current = self.embedder.embed(pcm, sample_rate)
         except Exception:
-            return False
-        # เผื่อระยะห่างจากเกณฑ์ไว้ ไม่ตัดสินว่าคนละคนจากความต่างเพียงเล็กน้อย
-        return cosine_similarity(current, stored) < (self.threshold - self.margin)
+            return candidates[0], False, False
+
+        backend = self.backend_name
+        best: tuple[float, Speaker] | None = None
+        without_print: Speaker | None = None
+        for candidate in candidates:
+            stored = self.store.voiceprint_for(candidate.id, backend)
+            if stored is None:
+                if without_print is None:
+                    without_print = candidate
+                continue
+            score = cosine_similarity(current, stored)
+            if best is None or score > best[0]:
+                best = (score, candidate)
+
+        if best is None:
+            # ทุกคนที่ชื่อนี้ยังไม่มีลายเสียง — พิสูจน์ไม่ได้ว่าคนละคน
+            return candidates[0], False, True
+
+        score, matched = best
+        if score >= (self.threshold - self.margin):
+            return matched, False, True
+        if without_print is not None:
+            # ยังมีคนชื่อนี้ที่ไม่มีลายเสียงให้เทียบ อาจเป็นเขาก็ได้
+            return without_print, False, True
+        if score >= self.fork_threshold:
+            # คาบเส้น — เป็นได้ทั้งคนเดิมที่เสียงเปลี่ยน (เป็นหวัด ไมค์คนละตัว
+            # ที่เสียงดัง) และคนใหม่ที่บังเอิญชื่อซ้ำ การแยกตัวตนผิดทำให้ความจำ
+            # หายทั้งก้อน จึงเลือกใช้คนเดิมไว้ก่อน แต่ไม่เอาเสียงนี้ไปสะสม
+            # เพราะถ้าเป็นคนละคนจริงจะทำให้ลายเสียงเพี้ยนไปทั้งคู่
+            return matched, False, False
+        return matched, True, True
+
+    @property
+    def fork_threshold(self) -> float:
+        """ต่ำกว่านี้จึงจะเชื่อว่าเป็นคนละคนที่บังเอิญชื่อซ้ำกัน
+
+        ตั้งห่างจากเกณฑ์จำเสียงมากกว่าเดิมสามเท่า เพราะการแยกตัวตนผิดแพงกว่า
+        การรวมผิดมาก — รวมผิดแก้ได้ด้วยการพูดใหม่ แยกผิดคือความจำหายทั้งก้อน
+        """
+        return self.threshold - 3 * self.margin
 
     def enroll(
         self,
@@ -513,27 +562,22 @@ class SpeakerIdentifier:
 
         claimed = extract_name_claim(transcript, expecting_name=expecting_name)
         if claimed:
-            speaker = self.store.find_speaker_by_name(claimed)
-            if speaker is not None and self._is_different_person(speaker, pcm, sample_rate):
+            from .thai_text import detect_particle, particle_for_gender
+
+            speaker, fork, sure = self._match_by_name(claimed, pcm, sample_rate)
+            gender = detect_particle(transcript)
+            if fork:
                 # ชื่อซ้ำกันแต่เสียงไม่ใช่คนเดิม — "สมชาย" มีได้หลายคน
                 # ถ้ายุบเป็นคนเดียวกัน คนที่สองจะได้อ่านความจำของคนแรก
                 # และลายเสียงของทั้งคู่จะถูกเฉลี่ยรวมกันจนจำใครไม่ได้เลย
-                from .thai_text import detect_particle, particle_for_gender
-
-                gender = detect_particle(transcript)
                 speaker = self.store.create_speaker(
                     claimed,
                     gender=gender,
                     particle=particle_for_gender(gender),
                     allow_duplicate_name=True,
                 )
-                if pcm is not None and self.enabled:
-                    self.enroll(speaker, pcm, sample_rate)
-                return Identification(speaker=speaker, is_new=True, method="name")
-            if speaker is None:
-                from .thai_text import detect_particle, particle_for_gender
-
-                gender = detect_particle(transcript)
+                created = True
+            elif speaker is None:
                 # ต้องใช้ get_or_create ไม่ใช่ create ตรง ๆ ไม่งั้นคำขอที่แข่งกัน
                 # สร้างชื่อเดียวกันพร้อมกันจะชน UNIQUE index แล้วกลายเป็น 500
                 speaker, created = self.store.get_or_create_speaker(
@@ -544,7 +588,7 @@ class SpeakerIdentifier:
             else:
                 created = False
                 self.store.touch_speaker(speaker.id)
-            if pcm is not None and self.enabled:
+            if sure and pcm is not None and self.enabled:
                 self.enroll(speaker, pcm, sample_rate)
             return Identification(
                 speaker=speaker,

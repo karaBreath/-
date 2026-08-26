@@ -1,6 +1,7 @@
 """ทดสอบ HTTP API และ WebSocket ด้วย Claude ปลอม"""
 
 import base64
+import time
 
 import pytest
 from conftest import FakeAnthropic, FakeEmbedder
@@ -9,6 +10,7 @@ fastapi = pytest.importorskip("fastapi", reason="ต้องติดตั้�
 from fastapi.testclient import TestClient  # noqa: E402
 
 from thaivoice import server as server_module  # noqa: E402
+from thaivoice.server import ServerRuntime, create_app  # noqa: E402
 from thaivoice.memory import MemoryStore  # noqa: E402
 from thaivoice.stt import pcm_to_wav  # noqa: E402
 from thaivoice.tts import Speech  # noqa: E402
@@ -549,3 +551,44 @@ class TestRuntimeLifecycle:
 
         assert runtime.stream_executor is not None
         assert runtime.stream_executor is not asyncio.get_event_loop_policy()
+
+
+class Testการปิดเซิร์ฟเวอร์:
+    """งานเบื้องหลังที่ค้างอยู่ต้องได้เขียนลงฐานข้อมูลก่อนปิด
+
+    ของเดิมสั่ง shutdown(wait=False) แล้วปิด store ทันที เธรดที่กำลังเขียนอยู่
+    จึงเจอ "Cannot operate on a closed database" ซึ่ง _safe_run กลืนทิ้ง
+    ผลคือทุกครั้งที่ deploy ใหม่หรือได้ SIGTERM ข้อเท็จจริงที่เพิ่งสกัดจาก
+    บทสนทนาช่วงท้ายจะหายเงียบ ๆ
+    """
+
+    def test_งานเบื้องหลังต้องเขียนเสร็จก่อนปิดฐานข้อมูล(self, settings, fake_client):
+        runtime = ServerRuntime(settings, client=fake_client)
+        speaker = runtime.store.create_speaker("เดช")
+        เขียนสำเร็จ = []
+
+        def งานช้า() -> None:
+            time.sleep(0.2)
+            runtime.store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+            เขียนสำเร็จ.append(True)
+
+        assert runtime.extractor is not None
+        runtime.extractor._pool.submit(งานช้า)
+        runtime.close()
+
+        assert เขียนสำเร็จ == [True], "งานที่ค้างต้องได้เขียนก่อนปิด"
+
+    def test_ปิดแล้ว_health_ต้องตอบไม่พร้อมไม่ใช่ระเบิด(self, settings, fake_client):
+        runtime = ServerRuntime(settings, client=fake_client)
+        app = create_app(settings, runtime=runtime)
+        with TestClient(app) as client:
+            runtime.close()
+            body = client.get("/health").json()
+
+        assert body["ok"] is False
+        assert body["closing"] is True
+
+    def test_ปิดซ้ำต้องไม่พัง(self, settings, fake_client):
+        runtime = ServerRuntime(settings, client=fake_client)
+        runtime.close()
+        runtime.close()

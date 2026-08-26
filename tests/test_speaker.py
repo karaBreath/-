@@ -229,3 +229,65 @@ class Testคำตอบสั้นตอนบอทถามชื่อ:
     )
     def test_ชื่อจริงยังผ่าน(self, answer, name):
         assert extract_name_claim(answer, expecting_name=True) == name
+
+
+class Testคนชื่อซ้ำกัน:
+    """การแยกตัวตนผิดแพงกว่าการรวมผิดมาก
+
+    รวมผิดแก้ได้ด้วยการพูดใหม่ แต่แยกผิดคือความจำหายทั้งก้อน แถวใหม่ได้กุญแจ
+    แยกจึงหาไม่เจออีกเลย และตัวอย่างเสียงที่ต่ำกว่าเกณฑ์นิดเดียวเกิดได้ง่ายมาก
+    (เป็นหวัด ไมค์คนละตัว อยู่ในที่เสียงดัง)
+    """
+
+    @staticmethod
+    def _มุม(องศา: float) -> list[float]:
+        import math
+
+        return [math.cos(math.radians(องศา)), math.sin(math.radians(องศา))]
+
+    def _ระบบ(self, store, คู่):
+        return SpeakerIdentifier(store, FakeEmbedder(table=คู่))
+
+    def test_เสียงเปลี่ยนไปนิดหน่อยต้องไม่แยกเป็นคนใหม่(self, store):
+        # cos ≈ 0.64 — ต่ำกว่าเกณฑ์จำเสียงแต่ยังสูงกว่าเกณฑ์แยกตัวตน
+        ระบบ = self._ระบบ(store, {b"normal": self._มุม(0), b"cold": self._มุม(50)})
+        first = ระบบ.resolve(b"normal", 16000, "ผมชื่อสมชายครับ")
+        store.upsert_fact(first.speaker.id, "เงินเดือน", "80000")
+
+        again = ระบบ.resolve(b"cold", 16000, "ผมชื่อสมชายครับ")
+
+        assert again.speaker.id == first.speaker.id
+        assert store.facts_for(again.speaker.id), "ความจำต้องยังอยู่"
+
+    def test_เสียงเปลี่ยนคาบเส้นต้องไม่เอาไปสะสมเป็นลายเสียง(self, store):
+        ระบบ = self._ระบบ(store, {b"normal": self._มุม(0), b"cold": self._มุม(50)})
+        first = ระบบ.resolve(b"normal", 16000, "ผมชื่อสมชายครับ")
+        เดิม = store.voiceprint_for(first.speaker.id, "fake")
+
+        ระบบ.resolve(b"cold", 16000, "ผมชื่อสมชายครับ")
+
+        assert store.voiceprint_for(first.speaker.id, "fake") == เดิม, (
+            "ถ้าเผลอเป็นคนละคนจริง การสะสมจะทำให้ลายเสียงเพี้ยนไปทั้งคู่"
+        )
+
+    def test_คนแปลกหน้าที่ชื่อซ้ำต้องเป็นคนละตัวตน(self, store):
+        ระบบ = self._ระบบ(store, {b"a": self._มุม(0), b"b": self._มุม(89)})
+        first = ระบบ.resolve(b"a", 16000, "ผมชื่อสมชายครับ")
+        store.upsert_fact(first.speaker.id, "โรคประจำตัว", "เบาหวาน")
+
+        second = ระบบ.resolve(b"b", 16000, "ผมชื่อสมชายครับ")
+
+        assert second.speaker.id != first.speaker.id
+        assert store.facts_for(second.speaker.id) == []
+
+    def test_คนที่สองต้องไม่ถูกสร้างซ้ำทุกครั้งที่กลับมา(self, store):
+        """ของเดิมเทียบกับแถวเดียว จึงสะสมแถวใหม่ไปเรื่อย ๆ ทุกวันที่กลับมาคุย"""
+        ระบบ = self._ระบบ(store, {b"a": self._มุม(0), b"b": self._มุม(89)})
+        ระบบ.resolve(b"a", 16000, "ผมชื่อสมชายครับ")
+        second = ระบบ.resolve(b"b", 16000, "ผมชื่อสมชายครับ")
+
+        for _ in range(5):
+            กลับมา = ระบบ.resolve(b"b", 16000, "ผมชื่อสมชายครับ")
+            assert กลับมา.speaker.id == second.speaker.id
+
+        assert len(store.find_speakers_by_name("สมชาย")) == 2
