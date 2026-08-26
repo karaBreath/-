@@ -358,8 +358,7 @@ class TestNumberExpansion:
     def test_เลขยาวอ่านทีละตัว(self):
         assert "หนึ่ง สอง สาม" in expand_numbers_for_speech("บัญชี 12345678")
 
-    def test_ไม่แตะเวลาและ_IP(self):
-        assert expand_numbers_for_speech("นัดกัน 20:30 นะ") == "นัดกัน 20:30 นะ"
+    def test_ไม่แตะ_IP(self):
         assert expand_numbers_for_speech("ไอพี 192.168.1.1") == "ไอพี 192.168.1.1"
 
     def test_ไม่แตะเลขที่ติดกับตัวอักษร(self):
@@ -508,3 +507,69 @@ class TestChunkerLatency:
         first_at, chunks = self._stream("ได้เลยค่ะ แล้วเดี๋ยวจะจัดการให้เรียบร้อยนะคะ")
         assert chunks[0] == "ได้เลยค่ะ"
         assert first_at <= 12
+
+
+class TestTimeAndPhoneReading:
+    """รูปแบบตัวเลขที่คนไทยเขียนจริง ซึ่งตัวอ่านตัวเลขทั่วไปอ่านผิดทั้งหมด"""
+
+    @pytest.mark.parametrize(
+        "text,expected_fragment",
+        [
+            # คนไทยเขียนเวลาด้วยจุดเป็นปกติ ถ้าอ่านเป็นทศนิยมจะฟังไม่รู้เรื่อง
+            ("นัดกัน 20.30 น.", "ยี่สิบนาฬิกาสามสิบนาที"),
+            ("เจอกัน 9.00 น.", "เก้านาฬิกา"),
+            ("นัดกัน 20:30", "ยี่สิบนาฬิกาสามสิบนาที"),
+            ("เวลา 0:05", "ศูนย์นาฬิกาห้านาที"),
+        ],
+    )
+    def test_อ่านเวลา(self, text, expected_fragment):
+        assert expected_fragment in expand_numbers_for_speech(text)
+
+    def test_เวลาแบบจุดต้องไม่ถูกอ่านเป็นทศนิยม(self):
+        assert "จุด" not in expand_numbers_for_speech("นัดกัน 20.30 น.")
+
+    def test_ทศนิยมที่ไม่ใช่เวลายังอ่านเป็นทศนิยม(self):
+        assert "จุด" in expand_numbers_for_speech("สูง 3.5 เมตร")
+
+    @pytest.mark.parametrize(
+        "text",
+        ["โทร 081-234-5678", "โทร. 02 123 4567", "เบอร์ +66 81 234 5678", "โทร 0812345678"],
+    )
+    def test_เบอร์โทรอ่านทีละตัว(self, text):
+        spoken = expand_numbers_for_speech(text)
+        # ถ้าอ่านเป็นจำนวนจะมีคำว่า ร้อย พัน หมื่น โผล่มา
+        assert not any(word in spoken for word in ("ร้อย", "พัน", "หมื่น")), spoken
+        assert "ศูนย์" in spoken or "หก หก" in spoken
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ราคา 1,234 บาท", "ราคา หนึ่งพันสองร้อยสามสิบสี่ บาท"),
+            ("ประชากร 1,000,000 คน", "ประชากร หนึ่งล้าน คน"),
+            ("ยอด 12,345,678 บาท", None),
+        ],
+    )
+    def test_เลขคั่นจุลภาคอ่านเป็นจำนวนเดียว(self, text, expected):
+        spoken = expand_numbers_for_speech(text)
+        assert "," not in spoken, spoken
+        if expected:
+            assert spoken == expected
+
+    def test_อ่านวันที่แบบทับ(self):
+        spoken = expand_numbers_for_speech("นัดวันที่ 15/8/2568")
+        assert "สิงหาคม" in spoken
+        assert "/" not in spoken
+
+    def test_วันที่ผิดรูปปล่อยไว้(self):
+        # เดือนที่ 13 ไม่มีจริง อย่าเดา
+        assert "/" in expand_numbers_for_speech("1/13/2568")
+
+    def test_เลขบ้านและคะแนนไม่ถูกเข้าใจผิดเป็นเบอร์โทร(self):
+        assert "ศูนย์ หนึ่ง" not in expand_numbers_for_speech("คะแนน 2-1")
+        assert "สอง" in expand_numbers_for_speech("คะแนน 2-1")
+
+    def test_รวมกันทั้งประโยค(self):
+        spoken = clean_for_speech("ประชุม 20.30 น. ที่ห้อง 302 ราคา 1,500 บาท")
+        assert "ยี่สิบนาฬิกาสามสิบนาที" in spoken
+        assert "หนึ่งพันห้าร้อย" in spoken
+        assert "," not in spoken

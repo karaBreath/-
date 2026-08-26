@@ -307,34 +307,101 @@ def read_digits(s: str) -> str:
     return " ".join(_DIGITS[int(c)] for c in s if c.isdigit())
 
 
-# ตัวเลขที่ยืนเดี่ยว ๆ — ไม่ติดกับตัวอักษร ไม่ใช่ส่วนของเวลา (20:30) หรือ IP
+# เวลา — ต้องจับก่อนตัวเลขทั่วไป
+#
+# คนไทยเขียนเวลาด้วย "จุด" เป็นปกติ ("20.30 น.") ถ้าปล่อยให้ตัวอ่านตัวเลขทั่วไป
+# จัดการ มันจะอ่านเป็นทศนิยมว่า "ยี่สิบจุดสามศูนย์" ซึ่งฟังไม่รู้เรื่องเลย
+# ส่วนรูปแบบที่ใช้ทวิภาค (20:30) ถือเป็นเวลาเสมอ
+_TIME_COLON = re.compile(r"(?<![\w.:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])")
+_TIME_DOT = re.compile(r"(?<![\w.:])([01]?\d|2[0-3])\.([0-5]\d)\s*น\.")
+
+# เบอร์โทรที่คั่นด้วยขีดหรือช่องว่าง (081-234-5678, 02 123 4567, +66 81 234 5678)
+# ต้องจับก่อน ไม่งั้นแต่ละกลุ่มจะถูกอ่านเป็นจำนวน ("หนึ่ง-สองร้อยสามสิบสี่-ห้าพัน...")
+_MAYBE_PHONE = re.compile(r"(?<![\w])(\+?\d[\d\- ]{7,17}\d)(?![\w])")
+
+# วันที่แบบ 15/8/2568 — เครื่องหมายทับอ่านออกเสียงไม่ได้
+_SLASH_DATE = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})/(\d{4})(?![\w/])")
+
+_THAI_MONTHS = (
+    "", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+)
+
+# เลขที่คั่นหลักพันด้วยจุลภาค — ต้องจับก่อนเช่นกัน ไม่งั้น "1,234" จะถูกอ่านเป็น
+# "หนึ่ง" กับ "สองร้อยสามสิบสี่" คนละก้อน
+_GROUPED_NUMBER = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})+)(?![\d,])")
+
+# ตัวเลขที่ยืนเดี่ยว ๆ — ไม่ติดกับตัวอักษร ไม่ใช่ส่วนของ IP
 _STANDALONE_NUMBER = re.compile(r"(?<![\w.:])(\d{1,12})(?:\.(\d{1,6}))?(?![\w:])(?!\.\d)")
 
 # ยาวขนาดนี้คนไทยอ่านทีละตัว ไม่อ่านเป็นจำนวน
 _DIGIT_BY_DIGIT_LENGTH = 8
 
 
+def _speak_integer(digits: str) -> str:
+    """อ่านสตริงตัวเลข — ยาวหรือขึ้นต้นด้วยศูนย์ให้อ่านทีละตัว"""
+    if (digits.startswith("0") and len(digits) > 1) or len(digits) >= _DIGIT_BY_DIGIT_LENGTH:
+        return read_digits(digits)
+    return thai_number_to_words(int(digits))
+
+
+def _speak_time(hour: str, minute: str) -> str:
+    """อ่านเวลาแบบทางการ — ชัดเจนและไม่กำกวมเรื่องเช้า/บ่าย"""
+    spoken = f"{thai_number_to_words(int(hour))}นาฬิกา"
+    if int(minute):
+        spoken += f"{thai_number_to_words(int(minute))}นาที"
+    return spoken
+
+
+def _speak_phone(match: re.Match[str]) -> str:
+    """อ่านเบอร์โทรทีละตัว ถ้าดูแล้วเป็นเบอร์โทรจริง ไม่งั้นปล่อยไว้"""
+    raw = match.group(1)
+    digits = re.sub(r"\D", "", raw)
+    looks_like_phone = 9 <= len(digits) <= 12 and (
+        digits.startswith("0") or digits.startswith("66")
+    )
+    return read_digits(digits) if looks_like_phone else raw
+
+
+def _speak_date(match: re.Match[str]) -> str:
+    day, month, year = (int(g) for g in match.groups())
+    if not 1 <= month <= 12:
+        return match.group(0)
+    return (
+        f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} "
+        f"{thai_number_to_words(year)}"
+    )
+
+
 def expand_numbers_for_speech(text: str) -> str:
     """แปลงตัวเลขอารบิกเป็นคำอ่านภาษาไทย เพื่อให้ TTS อ่านถูก
 
+    * เวลา (20:30 หรือ 20.30 น.) -> อ่านเป็นนาฬิกา/นาที
+    * วันที่ (15/8/2568) -> อ่านเป็นวันเดือนปี
+    * เบอร์โทรที่มีขีดคั่น -> อ่านทีละตัว
+    * เลขคั่นจุลภาค (1,234) -> อ่านเป็นจำนวนเดียว
     * เลขที่ขึ้นต้นด้วย 0 หรือยาวตั้งแต่ 8 หลัก -> อ่านทีละตัว (เบอร์โทร รหัส เลขบัญชี)
     * เลขทศนิยม -> อ่าน "จุด" แล้วอ่านหลังจุดทีละตัว
-    * เวลาแบบ 20:30 และเลขที่ติดกับตัวอักษร -> ปล่อยไว้ ไม่แตะ
+    * เลขที่ติดกับตัวอักษรหรือเป็นส่วนของ IP -> ปล่อยไว้ ไม่แตะ
 
     >>> expand_numbers_for_speech("ราคา 199 บาท")
     'ราคา หนึ่งร้อยเก้าสิบเก้า บาท'
-    >>> expand_numbers_for_speech("โทร 0812345678")
-    'โทร ศูนย์ แปด หนึ่ง สอง สาม สี่ ห้า หก เจ็ด แปด'
-    >>> expand_numbers_for_speech("นัดสองทุ่ม 20:30 นะ")
-    'นัดสองทุ่ม 20:30 นะ'
+    >>> expand_numbers_for_speech("นัดกัน 20.30 น.")
+    'นัดกัน ยี่สิบนาฬิกาสามสิบนาที'
+    >>> expand_numbers_for_speech("ราคา 1,234 บาท")
+    'ราคา หนึ่งพันสองร้อยสามสิบสี่ บาท'
     """
+    text = _SLASH_DATE.sub(_speak_date, text)
+    text = _TIME_DOT.sub(lambda m: _speak_time(m.group(1), m.group(2)), text)
+    text = _TIME_COLON.sub(lambda m: _speak_time(m.group(1), m.group(2)), text)
+    text = _MAYBE_PHONE.sub(_speak_phone, text)
+    text = _GROUPED_NUMBER.sub(
+        lambda m: _speak_integer(m.group(1).replace(",", "")), text
+    )
 
     def replace(match: re.Match[str]) -> str:
         whole, decimal = match.group(1), match.group(2)
-        if whole.startswith("0") and len(whole) > 1 or len(whole) >= _DIGIT_BY_DIGIT_LENGTH:
-            spoken = read_digits(whole)
-        else:
-            spoken = thai_number_to_words(int(whole))
+        spoken = _speak_integer(whole)
         if decimal:
             spoken = f"{spoken} จุด {read_digits(decimal)}"
         # ไม่เติมช่องว่างรอบคำอ่าน — ภาษาไทยเขียนติดกันอยู่แล้ว ("ราคา199บาท" ->
