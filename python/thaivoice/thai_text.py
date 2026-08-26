@@ -105,8 +105,9 @@ _SYMBOL_UNITS = [
     ("≤", " ไม่เกิน "),
     ("≥", " ไม่น้อยกว่า "),
     ("=", " เท่ากับ "),
-    ("→", " ไปยัง "),
-    ("←", " จาก "),
+    # "ราคา 100 → 80 บาท" คือการเปลี่ยนค่า ไม่ใช่ปลายทาง
+    ("→", " เป็น "),
+    ("←", " "),
     ("½", " ครึ่ง "),
     ("¼", " หนึ่งส่วนสี่ "),
     ("¾", " สามส่วนสี่ "),
@@ -362,7 +363,20 @@ def read_digits(s: str) -> str:
 # ส่วนรูปแบบที่ใช้ทวิภาค (20:30) ถือเป็นเวลาเสมอ
 # กิน "น." ที่ตามมาด้วย ไม่งั้นจะเหลือ "น." ลอยให้ TTS อ่านเป็นพยางค์
 _TIME_COLON = re.compile(r"(?<![\w.:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])(?:\s*น\.)?")
-_TIME_DOT = re.compile(r"(?<![\w.:])([01]?\d|2[0-3])\.([0-5]\d)\s*น\.")
+# ยอมรับ 24.00 ด้วย — คนไทยเขียนเวลาสิ้นวันแบบนี้เป็นปกติ
+_TIME_DOT = re.compile(r"(?<![\w.:])([01]?\d|2[0-4])\.([0-5]\d)\s*น\.")
+
+# ช่วงเวลา — ต้องจับก่อนกฎเวลาเดี่ยว
+#
+# "ร้านเปิด 10.00-22.00 น." และ "ตั้งแต่ 9.00 ถึง 17.00" คือวิธีเขียนเวลาทำการ
+# ที่พบบ่อยที่สุด แต่ _TIME_CONTEXT มองย้อนหลังแค่ 24 ตัวอักษรและไม่มีคำพวกนี้
+# ผลคืออ่านเป็นทศนิยม "สิบจุดศูนย์ศูนย์" ซึ่งไม่ใช่ภาษาไทยเลย
+# ที่สำคัญกว่านั้น การมีเวลาสองตัวคั่นด้วยขีดหรือ "ถึง" เป็นหลักฐานในตัวเอง
+# ว่าทั้งคู่เป็นเวลา ไม่ต้องพึ่งคำแวดล้อม
+_TIME_PART = r"(?:[01]?\d|2[0-4])[.:][0-5]\d"
+_TIME_RANGE = re.compile(
+    rf"(?<![\w.:])({_TIME_PART})\s*(?:-|ถึง|–|—)\s*({_TIME_PART})(?![\d\w])(?:\s*น\.)?"
+)
 
 # คนไทยเขียนเวลาแบบจุดโดยไม่มี "น." บ่อยมาก ("เจอกัน 19.00", "นัดตอน 8.30")
 # แต่ "3.50 เมตร" ก็หน้าตาเหมือนกันเป๊ะ จึงต้องดูคำแวดล้อมประกอบ
@@ -399,18 +413,32 @@ _SCORE_CONTEXT = re.compile(
     r"(?:คะแนน|สกอร์|ผลบอล|ผลการแข่ง|ผลแข่ง|ชนะ|แพ้|เสมอ)"
 )
 
-# เลขที่มีเครื่องหมายทับแต่ไม่ใช่วันที่ เช่นบ้านเลขที่ 99/1
+# เลขที่มีเครื่องหมายทับแต่ไม่ใช่วันที่
+#
+# "ทับ" ใช้กับที่อยู่และเลขห้องเท่านั้น ("บ้านเลขที่ 99/1" "ชั้น 3/1")
+# ของเดิมอ่าน "ทับ" กับทุกกรณี ทำให้เศษส่วนและคะแนนผิดหมด:
+# "แบ่งคนละ 1/2" -> "หนึ่งทับสอง", "สอบได้ 18/20" -> "สิบแปดทับยี่สิบ"
 _SLASH_PAIR = re.compile(r"(?<![\w/])(\d{1,5})/(\d{1,4})(?![\d\w/])")
+_ADDRESS_CONTEXT = re.compile(
+    r"(?:บ้านเลขที่|เลขที่|ที่อยู่|ห้อง|ชั้น|ซอย|ถนน|หมู่|อาคาร|ตึก|ยูนิต)"
+)
+# วันที่แบบไม่มีปี ("วันที่ 5/12") — ต้องมีคำว่าวันที่/เดือนนำหน้าจึงจะแน่ใจ
+_SLASH_DAY_MONTH = re.compile(
+    r"(?<=วันที่)\s*(\d{1,2})/(\d{1,2})(?![\d\w/])"
+)
 
 # เลขรหัสที่มีคำบอกบริบทนำหน้า — คนไทยอ่านทีละตัว ไม่อ่านเป็นจำนวน
 # ("ห้อง 2105" คือ "ห้องสองหนึ่งศูนย์ห้า" ไม่ใช่ "ห้องสองพันหนึ่งร้อยห้า")
 # ห้าม (?<![\w]) นำหน้า — ภาษาไทยเขียนติดกันไม่มีช่องว่าง "ไปห้อง 2105" จึงมี
 # "ป" อยู่หน้า "ห้อง" ซึ่งเป็น \w ทำให้กฎนี้แทบไม่เคยทำงานเลย
 # ต้องไม่กินเลขที่ตามด้วย "/" ("บ้านเลขที่ 123/45") ให้ _SLASH_PAIR จัดการต่อ
+# ยอมให้มีคำไทยคั่นระหว่างคำบอกบริบทกับตัวเลขได้ ("ห้องประชุม 2105",
+# "รหัสพนักงาน 123456", "เลขที่ใบสั่งซื้อ 778899") ของเดิมบังคับให้ติดกัน
+# กฎจึงทำงานเฉพาะกับสำนวนที่สั้นที่สุดเท่านั้น
 _CODE_NUMBER = re.compile(
     r"(ห้อง|ชั้น|ที่นั่ง|เบอร์|รหัส|ตู้|บ้านเลขที่|โต๊ะ|เที่ยวบิน|ล็อค|ล็อก"
-    r"|โทร|สายด่วน|ไปรษณีย์|ตู้ ?ปณ)"
-    r"\s*(\d{3,6})(?![\d\w/])"
+    r"|โทร|สายด่วน|ไปรษณีย์|ตู้ ?ปณ|เลขที่|OTP|otp|พัสดุ)"
+    r"([ก-๙]{0,12})\s*(\d{3,6})(?![\d\w/])"
 )
 
 # เลขที่คั่นหลักพันด้วยจุลภาค — ต้องจับก่อนเช่นกัน ไม่งั้น "1,234" จะถูกอ่านเป็น
@@ -418,9 +446,17 @@ _CODE_NUMBER = re.compile(
 _GROUPED_NUMBER = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})+)(?:\.(\d{1,2}))?(?![\d,])")
 
 # ตัวเลขที่ยืนเดี่ยว ๆ — ไม่ติดกับตัวอักษร ไม่ใช่ส่วนของ IP
+# เลขบัตรประชาชนไทยยาว 13 หลักพอดี บัตรเครดิต 16 หลัก ของเดิมจำกัดที่ 12
+# เลขพวกนี้จึงหลุดไปให้ TTS อ่านดิบ ๆ ทั้งก้อน
 _STANDALONE_NUMBER = re.compile(
-    r"(?<![\w.:])(-?)(\d{1,12})(?:\.(\d{1,6}))?(?![\w:])(?!\.\d)"
+    r"(?<![\w.:])([-+]?)(\d{1,24})(?:\.(\d{1,6}))?(?![\w:])(?!\.\d)"
 )
+
+# จำนวนเงินที่มีทศนิยมสองตำแหน่งและตามด้วย "บาท"
+#
+# "1,234.50 บาท" อ่านว่า "หนึ่งพันสองร้อยสามสิบสี่บาทห้าสิบสตางค์"
+# ไม่ใช่ "จุดห้าศูนย์บาท" ซึ่งฟังออกทันทีว่าเครื่องอ่าน
+_BAHT_SATANG = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*บาท")
 
 # ยาวขนาดนี้คนไทยอ่านทีละตัว ไม่อ่านเป็นจำนวน
 _DIGIT_BY_DIGIT_LENGTH = 8
@@ -490,6 +526,23 @@ def expand_numbers_for_speech(text: str) -> str:
     'ราคา หนึ่งพันสองร้อยสามสิบสี่ บาท'
     """
     text = _SLASH_DATE.sub(_speak_date, text)
+
+    def time_range(match: re.Match[str]) -> str:
+        first, second = (re.split(r"[.:]", g) for g in match.groups())
+        return (
+            f"{_speak_time(first[0], first[1])}ถึง"
+            f"{_speak_time(second[0], second[1])}"
+        )
+
+    def baht_satang(match: re.Match[str]) -> str:
+        baht = thai_number_to_words(int(match.group(1).replace(",", "")))
+        satang = int(match.group(2))
+        if not satang:
+            return f"{baht}บาทถ้วน"
+        return f"{baht}บาท{thai_number_to_words(satang)}สตางค์"
+
+    text = _BAHT_SATANG.sub(baht_satang, text)
+    text = _TIME_RANGE.sub(time_range, text)
     text = _TIME_DOT.sub(lambda m: _speak_time(m.group(1), m.group(2)), text)
     text = _TIME_COLON.sub(lambda m: _speak_time(m.group(1), m.group(2)), text)
 
@@ -502,7 +555,7 @@ def expand_numbers_for_speech(text: str) -> str:
     text = _TIME_DOT_BARE.sub(bare_time, text)
     text = _MAYBE_PHONE.sub(_speak_phone, text)
     text = _CODE_NUMBER.sub(
-        lambda m: f"{m.group(1)} {read_digits(m.group(2))}", text
+        lambda m: f"{m.group(1)}{m.group(2)} {read_digits(m.group(3))}", text
     )
 
     def range_or_score(match: re.Match[str]) -> str:
@@ -513,9 +566,22 @@ def expand_numbers_for_speech(text: str) -> str:
             f"{_speak_quantity(match.group(2))}"
         )
 
-    text = _SLASH_PAIR.sub(
-        lambda m: f"{_speak_integer(m.group(1))}ทับ{_speak_integer(m.group(2))}", text
-    )
+    def slash_pair(match: re.Match[str]) -> str:
+        window = text[max(0, match.start() - 24) : match.start()]
+        left, right = _speak_integer(match.group(1)), _speak_integer(match.group(2))
+        if _ADDRESS_CONTEXT.search(window):
+            return f"{left}ทับ{right}"
+        # ไม่ใช่ที่อยู่ก็เป็นเศษส่วนหรือคะแนน ซึ่งภาษาไทยใช้ "ส่วน"
+        return f"{left}ส่วน{right}"
+
+    def day_month(match: re.Match[str]) -> str:
+        day, month = int(match.group(1)), int(match.group(2))
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return match.group(0)
+        return f" {thai_number_to_words(day)} {_THAI_MONTHS[month]}"
+
+    text = _SLASH_DAY_MONTH.sub(day_month, text)
+    text = _SLASH_PAIR.sub(slash_pair, text)
 
     def grouped(match: re.Match[str]) -> str:
         # จุลภาคคั่นหลักพันคือหลักฐานว่าเป็น "จำนวน" ไม่ใช่รหัส จึงอ่านเป็นจำนวน
@@ -530,9 +596,10 @@ def expand_numbers_for_speech(text: str) -> str:
 
     def replace(match: re.Match[str]) -> str:
         sign, whole, decimal = match.group(1), match.group(2), match.group(3)
-        # ขีดกลางหน้าเลข TTS อ่านไม่ออก "อุณหภูมิ -5 องศา" จึงฟังเป็น "ห้าองศา"
-        # ซึ่งความหมายกลับด้าน
-        spoken = ("ลบ" if sign else "") + _speak_integer(whole)
+        # เครื่องหมายหน้าเลข TTS อ่านไม่ออก "อุณหภูมิ -5 องศา" จึงฟังเป็น
+        # "ห้าองศา" ซึ่งความหมายกลับด้าน "+15%" ก็เสียเครื่องหมายไปเหมือนกัน
+        prefix = {"-": "ลบ", "+": "บวก"}.get(sign, "")
+        spoken = prefix + _speak_integer(whole)
         if decimal:
             spoken = f"{spoken} จุด {read_digits(decimal)}"
         # ไม่เติมช่องว่างรอบคำอ่าน — ภาษาไทยเขียนติดกันอยู่แล้ว ("ราคา199บาท" ->
