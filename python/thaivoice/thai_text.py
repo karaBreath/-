@@ -115,9 +115,10 @@ _SYMBOL_UNITS = [
 # สัญลักษณ์สกุลเงิน — ภาษาไทยพูดหน่วยเงิน *หลัง* จำนวนเสมอ
 # "฿500" คือ "ห้าร้อยบาท" ไม่ใช่ "บาทห้าร้อย"
 _CURRENCY = {"฿": "บาท", "$": "ดอลลาร์", "€": "ยูโร", "£": "ปอนด์", "¥": "เยน"}
-_CURRENCY_RE = re.compile(
-    r"([" + "".join(re.escape(c) for c in _CURRENCY) + r"])\s*(\d[\d,]*(?:\.\d+)?)"
-)
+_CURRENCY_CLASS = "[" + "".join(re.escape(c) for c in _CURRENCY) + "]"
+_AMOUNT = r"\d[\d,]*(?:\.\d+)?"
+_CURRENCY_BEFORE = re.compile(rf"({_CURRENCY_CLASS})\s*({_AMOUNT})")
+_CURRENCY_AFTER = re.compile(rf"({_AMOUNT})\s*({_CURRENCY_CLASS})")
 
 # ตัวย่อเดือนไทย — TTS อ่านเป็นพยางค์เดี่ยว ๆ ("ก. ค.") ซึ่งฟังไม่ออกว่าเดือนอะไร
 _MONTH_ABBR = {
@@ -166,9 +167,12 @@ def clean_for_speech(text: str, expand_numbers: bool = True) -> str:
     s = s.replace("~", " ")
 
     # สกุลเงินต้องย้ายไปหลังจำนวนก่อนที่ตัวกรองสัญลักษณ์จะลบเครื่องหมายทิ้ง
-    s = _CURRENCY_RE.sub(lambda m: f" {m.group(2)} {_CURRENCY[m.group(1)]} ", s)
-    for symbol, spoken in _CURRENCY.items():
-        s = s.replace(symbol, f" {spoken} ")
+    s = _CURRENCY_BEFORE.sub(lambda m: f" {m.group(2)} {_CURRENCY[m.group(1)]} ", s)
+    s = _CURRENCY_AFTER.sub(lambda m: f" {m.group(1)} {_CURRENCY[m.group(2)]} ", s)
+    # เครื่องหมายที่ไม่ติดกับตัวเลขมักไม่ใช่ราคา ("echo $HOME", "a$b")
+    # อ่านว่า "ดอลลาร์" ตรงนั้นแย่กว่าเงียบไปเฉย ๆ ยกเว้น ฿ ที่ไม่มีความหมายอื่น
+    s = s.replace("฿", " บาท ")
+    s = re.sub(_CURRENCY_CLASS, " ", s)
 
     # ตัวย่อเดือนต้องแปลงก่อนแตะจุด ไม่งั้นเหลือ "ก. ค." ให้อ่านทีละพยางค์
     s = _MONTH_ABBR_RE.sub(lambda m: f" {_MONTH_ABBR[m.group(0)]} ", s)
