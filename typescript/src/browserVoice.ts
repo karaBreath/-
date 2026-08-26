@@ -493,6 +493,15 @@ interface PendingTurn {
   id: number;
   reply: string;
   /**
+   * socket ที่ส่งเทิร์นนี้ออกไป
+   *
+   * จำเป็นเพราะเมื่อ socket ตาย ต้องรู้ว่าเทิร์นไหนตายไปกับมันบ้าง ของเดิม
+   * ล้างเทิร์นทั้งกอง (ฆ่าเทิร์นใหม่ที่ยังไม่ได้ส่งไปด้วย) หรือไม่ล้างเลย
+   * (เทิร์นเก่าค้างในคิวตลอดกาล ดูดเหตุการณ์ของเทิร์นใหม่ไปหมด สถานะค้างที่
+   * "กำลังคิด" ไมโครโฟนไม่เปิดกลับมา และไม่มีข้อความบอกผู้ใช้เลย)
+   */
+  stream?: StreamConnection;
+  /**
    * ผู้ใช้พูดแทรกตัดเทิร์นนี้ไปแล้ว
    *
    * ต้องคาไว้ในคิวต่อ ไม่ใช่เอาออกทันที เพราะเซิร์ฟเวอร์ยังส่งประโยคที่เหลือ
@@ -501,6 +510,23 @@ interface PendingTurn {
    */
   abandoned: boolean;
 }
+
+/**
+ * รหัสข้อผิดพลาดที่เริ่มการถอดเสียงใหม่ไปก็ล้มซ้ำทันที
+ *
+ * ทั้งสามอย่างนี้ต้องให้ผู้ใช้ไปแก้ที่เบราว์เซอร์หรืออุปกรณ์ก่อน
+ */
+const FATAL_RECOGNITION_ERRORS = new Set([
+  "not-allowed",
+  "service-not-allowed",
+  "audio-capture",
+]);
+
+const FATAL_RECOGNITION_MESSAGES: Record<string, string> = {
+  "not-allowed": "เบราว์เซอร์ไม่อนุญาตให้ใช้ไมโครโฟน กรุณาอนุญาตแล้วกดเริ่มคุยใหม่",
+  "service-not-allowed": "เบราว์เซอร์ไม่อนุญาตให้ใช้บริการถอดเสียง กรุณาลองใหม่อีกครั้ง",
+  "audio-capture": "ไม่พบไมโครโฟน กรุณาเสียบไมโครโฟนแล้วกดเริ่มคุยใหม่",
+};
 
 export class VoiceConversation {
   private recognition: SpeechRecognitionLike | null = null;
@@ -511,6 +537,8 @@ export class VoiceConversation {
   private running = false;
   private starting = false;
   private recognitionPaused = false;
+  /** เจอ error ที่เริ่มใหม่ไปก็ล้มซ้ำ — หยุดวนแล้วรอให้ผู้ใช้กดเริ่มใหม่เอง */
+  private recognitionFatal = false;
   private stream: StreamConnection | null = null;
   private streamReady: Promise<StreamConnection> | null = null;
   private turnId = 0;
@@ -523,6 +551,18 @@ export class VoiceConversation {
    * เทิร์นก่อนถูกนับเป็นของเทิร์นใหม่ทั้งเสียงและข้อความ
    */
   private pending: PendingTurn[] = [];
+  /** จำนวนเทิร์นโหมดกดพูดที่ยังรอคำตอบทาง HTTP อยู่ (ไม่ผ่านคิว pending) */
+  private awaitingDirect = 0;
+  /**
+   * ต่อคิวการส่งไว้เป็นสายเดียว
+   *
+   * Chrome ส่งผลถอดเสียงสุดท้ายสองอันในเหตุการณ์เดียวได้ ``submit`` ผลัก
+   * เข้าคิว pending แบบซิงโครนัสแต่ส่งจริงแบบ asynchronous ประโยคแรกต้องรอ
+   * แปลงเสียงเป็น base64 ส่วนประโยคที่สองไม่มีเสียงให้แปลง (ประโยคแรกดูดไป
+   * หมดแล้ว) จึงแซงไปถึงเซิร์ฟเวอร์ก่อน บอทตอบประโยคที่สองก่อน บันทึกบทสนทนา
+   * สลับลำดับ และทุกเหตุการณ์ของคำตอบนั้นถูกจับคู่กับเทิร์นผิดตัว
+   */
+  private sendChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly client: ThaiVoiceClient,
@@ -544,6 +584,7 @@ export class VoiceConversation {
 
   /** เริ่มฟัง */
   async start(): Promise<void> {
+    this.recognitionFatal = false;
     // ต้องกันตั้งแต่ยังไม่เสร็จ ไม่ใช่กันตอน running กลายเป็น true
     // เพราะช่วงรอสิทธิ์ไมโครโฟนกินเวลาได้หลายวินาที (ครั้งแรก หรือหูฟังบลูทูธ)
     // ถ้าผู้ใช้กดปุ่มซ้ำในช่วงนั้น จะได้ไมโครโฟนสองตัวที่ปิดไม่ได้อีกเลย
@@ -608,9 +649,16 @@ export class VoiceConversation {
     recognition.onerror = (event) => {
       const code = (event as Event & { error?: string }).error;
       // "no-speech" เกิดตลอดเวลาเมื่อผู้ใช้เงียบ ไม่ใช่ข้อผิดพลาดจริง
-      if (code && code !== "no-speech" && code !== "aborted") {
-        this.options.onError?.(new Error(`ถอดเสียงผิดพลาด: ${code}`));
+      if (!code || code === "no-speech" || code === "aborted") return;
+      if (FATAL_RECOGNITION_ERRORS.has(code)) {
+        // ยิง error แล้ว end ตามมา ซึ่ง onend จะสั่ง start ใหม่ แล้วก็ล้มแบบเดิม
+        // ทันที วนประมาณเก้าร้อยรอบต่อวินาทีตลอดไป หน้าเว็บที่ต่อ onError
+        // เข้ากับการเพิ่ม DOM node จะบวมจนค้าง
+        this.recognitionFatal = true;
+        this.options.onError?.(new Error(FATAL_RECOGNITION_MESSAGES[code] ?? code));
+        return;
       }
+      this.options.onError?.(new Error(`ถอดเสียงผิดพลาด: ${code}`));
     };
 
     recognition.onend = () => {
@@ -622,6 +670,7 @@ export class VoiceConversation {
       // ฟังต่อระหว่างบอทพูด ถอดเสียงบอทเอง แล้วส่งกลับไปเป็นเทิร์นใหม่ —
       // บทสนทนาวนไม่จบที่แก้ไปแล้วรอบก่อน
       if (this.recognition !== recognition) return;
+      if (this.recognitionFatal) return; // เริ่มใหม่ไปก็ล้มแบบเดิม
       if (this.running && !this.recognitionPaused) {
         try {
           recognition.start();
@@ -727,6 +776,7 @@ export class VoiceConversation {
     const turn = ++this.turnId;
     this.audio.accept(turn);
     this.synth.accept(turn);
+    this.awaitingDirect += 1;
     this.setState("thinking");
     try {
       const result = await this.client.voice(wav, {
@@ -746,7 +796,11 @@ export class VoiceConversation {
       }
     } catch (error) {
       this.options.onError?.(error as Error);
+      this.audio.discard(turn);
+      this.synth.discard(turn);
       this.setState("listening");
+    } finally {
+      this.awaitingDirect = Math.max(0, this.awaitingDirect - 1);
     }
   }
 
@@ -758,6 +812,18 @@ export class VoiceConversation {
     this.pending.push({ id: turn, reply: "", abandoned: false });
     this.audio.accept(turn);
     this.synth.accept(turn);
+
+    // จองคิวการส่งตรงนี้ ก่อนจะมี await ตัวไหนทั้งสิ้น
+    //
+    // submit ถูกเรียกแบบซิงโครนัสทีละประโยคจาก onresult ส่วนหัวที่ไม่มี await
+    // จึงรันตามลำดับที่พูดแน่นอน ถ้าไปจองหลังจากแปลงเสียงเป็น base64 เสร็จ
+    // ประโยคที่สอง (ซึ่งไม่มีเสียงให้แปลง เพราะประโยคแรกดูดบัฟเฟอร์ไปหมดแล้ว)
+    // จะจองได้ก่อน แล้วแซงไปถึงเซิร์ฟเวอร์ก่อน
+    const previous = this.sendChain;
+    let release: () => void = () => {};
+    this.sendChain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     this.setState("thinking");
 
     // ปิดการฟังระหว่างบอทพูด ไม่งั้นไมโครโฟนจะได้ยินเสียงบอทเอง แล้วระบบจะ
@@ -778,8 +844,15 @@ export class VoiceConversation {
     }
 
     try {
-      const stream = await this.ensureStream();
-      stream.send(text, { audio: audioBase64, speak: this.options.serverTts ?? true });
+      try {
+        await previous; // ประโยคก่อนหน้าต้องถูกส่งออกไปก่อน
+        const stream = await this.ensureStream();
+        stream.send(text, { audio: audioBase64, speak: this.options.serverTts ?? true });
+        const entry = this.pending.find((item) => item.id === turn);
+        if (entry) entry.stream = stream;
+      } finally {
+        release();
+      }
     } catch (error) {
       this.options.onError?.(error as Error);
       // ทิ้งเฉพาะเทิร์นนี้ ของเดิมล้าง pending ทั้งกอง เทิร์นก่อนหน้าที่กำลัง
@@ -811,12 +884,21 @@ export class VoiceConversation {
     // promise เดิมที่ resolve แล้ว ผู้เรียกส่งข้อความไม่ได้ ได้ error กำกวม
     // แล้ว dropPending ก็ล้างเทิร์นที่ยังคุยอยู่ทิ้งไปด้วย
     if (this.stream && !this.stream.open) {
+      const dead = this.stream;
       this.stream = null;
       this.streamReady = null;
+      try {
+        dead.close();
+      } catch {
+        // ปิดไปแล้ว
+      }
+      // เทิร์นที่ส่งไปกับ socket ตัวนี้จะไม่มีคำตอบแล้ว ต้องเก็บกวาดตรงนี้
+      // เพราะ onClose ของมันจะเห็นว่า this.stream ไม่ใช่ตัวเองแล้วจึงไม่ทำอะไร
+      this.dropPending("การเชื่อมต่อหลุด ลองพูดอีกครั้ง", (turn) => turn.stream === dead);
     }
     if (this.streamReady) return this.streamReady;
 
-    this.streamReady = (async () => {
+    const ready = (async () => {
       let connection: StreamConnection;
       connection = this.client.stream({
         onEvent: (event: StreamEvent) => this.handleEvent(event),
@@ -834,7 +916,15 @@ export class VoiceConversation {
           this.streamReady = null;
           // การเชื่อมต่อหลุดกลางเทิร์นต้องบอกผู้ใช้และปลดสถานะ ไม่งั้น UI จะค้าง
           // ที่ "กำลังคิด" ตลอดกาล และไมโครโฟนที่ถูกพักไว้จะไม่ถูกเปิดกลับมาเลย
-          this.dropPending("การเชื่อมต่อหลุด ลองพูดอีกครั้ง");
+          // ทิ้งเฉพาะเทิร์นที่ส่งไปกับ socket ตัวนี้
+          //
+          // เทิร์นที่ยังไม่ได้ส่งต้องรอด — ผู้ใช้พูดประโยคใหม่ในจังหวะเดียวกับที่
+          // socket เก่าปิดเป็นเรื่องปกติมาก ประโยคนั้นจะถูกส่งไปกับ socket ตัวใหม่
+          // ถ้าล้างทิ้งตรงนี้ด้วย ผู้ใช้จะไม่ได้คำตอบและเห็นแต่ "การเชื่อมต่อหลุด"
+          this.dropPending(
+            "การเชื่อมต่อหลุด ลองพูดอีกครั้ง",
+            (turn) => turn.stream === connection,
+          );
         },
       });
       try {
@@ -847,8 +937,15 @@ export class VoiceConversation {
       this.stream = connection;
       return connection;
     })();
-
-    return this.streamReady;
+    // ต้องล้างทิ้งเมื่อล้มเหลว ไม่งั้น promise ที่ reject แล้วจะถูกเก็บไว้ตลอด
+    // ทางออกที่ ensureStream ใช้ล้าง (this.stream) เป็น null อยู่แล้วในกรณีที่
+    // client.stream() โยน error ตั้งแต่ก่อนสร้าง socket ทุกประโยคหลังจากนั้น
+    // จะล้มด้วย error เดิมค้างไปทั้งเซสชัน โดยไม่พยายามต่อใหม่เลยสักครั้ง
+    ready.catch(() => {
+      if (this.streamReady === ready) this.streamReady = null;
+    });
+    this.streamReady = ready;
+    return ready;
   }
 
   private handleEvent(event: StreamEvent): void {
@@ -917,18 +1014,39 @@ export class VoiceConversation {
   private maybeFinish(): void {
     if (this.pending.length > 0) return;
     if (this.audio.busy || this.synth.busy) return;
+    // โหมดกดพูดไม่ผ่านคิว pending (มันรอคำตอบทาง HTTP ไม่ใช่ WebSocket)
+    // ถ้าลืมหมายเลขเทิร์นตอนนี้ คำตอบที่กำลังเดินทางกลับมาจะถูกทิ้งทั้งเสียง
+    // แล้วสถานะจะค้างที่ "กำลังพูด" ตลอดกาล เพราะไม่มีอะไรเข้าคิวให้ onIdle ยิง
+    if (this.awaitingDirect > 0) return;
     // ทุกอย่างว่างแล้ว ลืมหมายเลขเทิร์นเก่าได้ กันเซ็ตโตไม่หยุดในบทสนทนายาว ๆ
     this.audio.reset();
     this.synth.reset();
     this.finishTurn();
   }
 
-  /** ยกเลิกเทิร์นที่ค้างอยู่ทั้งหมด (ใช้เมื่อการเชื่อมต่อหลุดหรือส่งไม่สำเร็จ) */
-  private dropPending(message?: string): void {
-    if (this.pending.length === 0) return;
-    this.pending = [];
+  /**
+   * ยกเลิกเทิร์นที่ค้างอยู่ (ใช้เมื่อการเชื่อมต่อหลุดหรือส่งไม่สำเร็จ)
+   *
+   * ``match`` เลือกว่าเทิร์นไหนต้องทิ้ง — ค่าเริ่มต้นคือทิ้งทั้งหมด
+   *
+   * ต้องหยุดเสียงของเทิร์นที่ทิ้งด้วย และต้องผ่าน ``maybeFinish`` ไม่ใช่
+   * ``finishTurn`` ตรง ๆ ของเดิมข้ามการเช็คว่าบอทยังพูดอยู่ไหม จึงเปิด
+   * ไมโครโฟนกลับมาทั้งที่เสียงที่เข้าคิวไว้ยังเล่นอยู่ ระบบก็ได้ยินเสียงตัวเอง
+   * ถอดเป็นข้อความ ตอบตัวเอง แล้วเอาเสียงบอทไปสะสมเป็นลายเสียงของผู้ใช้
+   */
+  private dropPending(
+    message?: string,
+    match: (turn: PendingTurn) => boolean = () => true,
+  ): void {
+    const dropped = this.pending.filter(match);
+    if (dropped.length === 0) return;
+    this.pending = this.pending.filter((turn) => !match(turn));
+    for (const turn of dropped) {
+      this.audio.discard(turn.id);
+      this.synth.discard(turn.id);
+    }
     if (message) this.options.onError?.(new Error(message));
-    this.finishTurn();
+    this.maybeFinish();
   }
 
   private finishTurn(): void {

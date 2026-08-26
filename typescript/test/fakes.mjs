@@ -184,6 +184,7 @@ export class FakeSpeechRecognition {
     this.stopped = 0;
     this.aborted = 0;
     this.running = false;
+    this.failMode = null;
     this.onresult = null;
     this.onerror = null;
     this.onend = null;
@@ -195,6 +196,12 @@ export class FakeSpeechRecognition {
     if (this.running) throw new Error("already started");
     this.running = true;
     this.started += 1;
+    // ใช้ setTimeout ไม่ใช่ queueMicrotask — ถ้าโค้ดวนเริ่มใหม่ไม่จบ ลูป
+    // microtask จะกิน event loop จนเทสต์แขวน แทนที่จะล้มให้เห็น
+    // และต้องมีเพดาน ไม่งั้น timer ที่นัดกันเองไม่จบจะทำให้โปรเซสไม่ยอมออก
+    if (this.failMode && this.started <= 20) {
+      setTimeout(() => this.fail(this.failMode), 0).unref?.();
+    }
   }
 
   stop() {
@@ -214,6 +221,30 @@ export class FakeSpeechRecognition {
     this.aborted += 1;
     this.running = false;
     queueMicrotask(() => this.onend?.());
+  }
+
+  /**
+   * จำลองข้อผิดพลาดแบบที่เบราว์เซอร์จริงยิง — error แล้ว end ตามมา
+   *
+   * ของจริงหยุดทำงานก่อนยิง end เสมอ เรียก onend() เปล่า ๆ ในเทสต์จึงใจดี
+   * กว่าความจริง เพราะ start() รอบถัดไปจะโยน "already started" ทิ้งไปเอง
+   */
+  fail(code) {
+    this.onerror?.({ error: code });
+    this.running = false;
+    this.onend?.();
+  }
+
+  /**
+   * ทำให้ทุก start() ต่อจากนี้ล้มด้วยรหัสเดิม
+   *
+   * นี่คือพฤติกรรมจริงเมื่อผู้ใช้ถอนสิทธิ์ไมโครโฟนหรือถอดอุปกรณ์ออก —
+   * เริ่มใหม่กี่ครั้งก็ล้มแบบเดิมทันที ของปลอมที่ล้มแค่ครั้งเดียวใจดีเกินไป
+   * จนบัคการวนเริ่มใหม่ไม่โผล่
+   */
+  failForever(code) {
+    this.failMode = code;
+    this.fail(code);
   }
 
   /** ยิงผลลัพธ์สุดท้ายหลายรายการในเหตุการณ์เดียว (เกิดขึ้นจริงกับ Chrome) */
