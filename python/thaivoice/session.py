@@ -318,6 +318,9 @@ class ConversationSession:
         # ช่องเดียว คำขอของคนที่สองจึงทับของคนแรกทิ้งเงียบ ๆ คนแรกที่ถูกบอกให้
         # พูดว่า "ยืนยัน" พูดตามแล้วไม่มีอะไรเกิดขึ้น โมเดลตอบเองว่าจัดการให้แล้ว
         self._pending_forget: dict[int, float] = {}
+        # คนที่ถูกเตือนไปแล้วครั้งหนึ่งว่าให้พูดว่า "ยืนยัน"
+        # เตือนซ้ำไม่จบทำให้คุยเรื่องอื่นไม่ได้เลย
+        self._forget_nudged: set[int] = set()
         # เทิร์นก่อนหน้าบอทถามชื่อไปหรือเปล่า
         self._asked_for_name = False
 
@@ -366,6 +369,7 @@ class ConversationSession:
         if not self.store.speaker_exists(self.current_speaker.id):
             log.info("ผู้สนทนา %s ถูกลบไปแล้ว ล้างสถานะ", self.current_speaker.id)
             self._pending_forget.pop(self.current_speaker.id, None)
+            self._forget_nudged.discard(self.current_speaker.id)
             self.current_speaker = None
         return self.current_speaker
 
@@ -496,6 +500,7 @@ class ConversationSession:
             answer = is_affirmative(transcript)
             if answer is True:
                 del self._pending_forget[speaker.id]
+                self._forget_nudged.discard(speaker.id)
                 removed = self.store.forget_everything(speaker.id)
                 log.info("ลบความจำของ speaker %s: %s", speaker.id, removed)
                 return self._say(
@@ -507,6 +512,7 @@ class ConversationSession:
                 )
             if answer is False:
                 del self._pending_forget[speaker.id]
+                self._forget_nudged.discard(speaker.id)
                 return self._say(
                     f"ได้{particle} งั้นไม่ลบนะ{_soft(particle)} ความจำทั้งหมดยังอยู่ครบ",
                     speaker,
@@ -518,7 +524,15 @@ class ConversationSession:
             # "ยืนยัน" ผู้ใช้พูดตามแล้วไม่มีอะไรเกิดขึ้น โมเดลตอบเองว่า
             # "จัดการให้แล้วครับ" ทั้งที่ข้อมูลยังอยู่ครบ — คำสั่งลบที่ผู้ใช้
             # เชื่อว่าทำไปแล้วแต่ไม่ได้ทำ เป็นบั๊กที่ยอมไม่ได้
-            # จึงคงสถานะรอไว้และรีเซ็ตนาฬิกาให้ตอบทันเสมอ
+            # จึงคงสถานะรอไว้และรีเซ็ตนาฬิกาให้ตอบทันเสมอ — แต่เตือนได้ครั้งเดียว
+            #
+            # ถ้าเตือนทุกครั้งที่ตอบไม่ชัด ผู้ใช้ที่เปลี่ยนเรื่องไปแล้วจะคุยเรื่องอื่น
+            # ไม่ได้เลย ทุกประโยคจะถูกตอบด้วยข้อความเดิมไปตลอด
+            if speaker.id in self._forget_nudged:
+                del self._pending_forget[speaker.id]
+                self._forget_nudged.discard(speaker.id)
+                return None
+            self._forget_nudged.add(speaker.id)
             self._pending_forget[speaker.id] = time.time()
             return self._say(
                 f'ยังไม่ได้ลบอะไรนะ{_soft(particle)} ถ้าจะลบจริง ๆ พูดว่า "ยืนยัน" '
@@ -548,6 +562,7 @@ class ConversationSession:
             )
 
         self._pending_forget[speaker.id] = time.time()
+        self._forget_nudged.discard(speaker.id)
         stats = self.store.stats(speaker.id)
         return self._say(
             f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}ทั้งหมด "

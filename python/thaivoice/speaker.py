@@ -50,6 +50,11 @@ __all__ = [
 _PRONOUN = r"(?:ผม|ดิฉัน|ฉัน|หนู|กระผม|ข้าพเจ้า|เรา|อั๊ว)"
 _NAME_CHARS = r"[ก-๙A-Za-z][ก-๙A-Za-z0-9.'-]{0,14}"
 
+# กฎที่ *ไม่มี* สรรพนามหรือคำบอกชัดว่าเป็นการแนะนำตัว — ต้องเข้มกับคำกำกวม
+# ("ชื่อลูกค้า" ไม่ใช่ชื่อคน) ส่วนกฎที่มีสรรพนามยืนยันแล้วไม่ต้องเข้ม
+# ("ดิฉันชื่อลูกปัดค่ะ" เป็นชื่อคนแน่นอน)
+_BARE_PATTERN_INDEX = 2
+
 _NAME_PATTERNS = [
     # "ชื่อเล่นชื่อบิ๊กครับ" / "ชื่อเล่นว่าบิ๊ก" — ต้องมาก่อนกฎทั่วไป
     re.compile(rf"ชื่อเล่น(?:ชื่อ|ว่า|คือ)?\s*({_NAME_CHARS})"),
@@ -182,7 +187,8 @@ _NAMES_ENDING_IN_NA = {"มานะ", "ปัญญะ", "วีระนะ", 
 # "วัฒนะ" -> "วัฒ" และ "พัฒนะ" -> "พัฒ" ซึ่งอ่านออกเสียงว่า "วัด" "พัด"
 # แล้วบอทจะเรียกเขาว่า "คุณวัฒ" ไปตลอด บัญชีรายชื่อล้วน ๆ ขยายตามไม่ทัน
 # (วัฒนะ พัฒนะ ชัยวัฒนะ ล้วนเป็นชื่อที่พบบ่อย) จึงใช้กฎการสะกดแทน
-_RARE_FINAL_CONSONANTS = "ฒฑฌฎฏฐฆฬ"
+# ตั้งใจไม่ใส่ "ฐ" — "ณัฐ" "รัฐ" เป็นคำที่จบในตัวเองและพบบ่อยกว่า "วัฒนะ" มาก
+_RARE_FINAL_CONSONANTS = "ฒฑฌฎฏฆฬ"
 
 # คำที่ขึ้นต้นคำตอบซึ่งบอกชัดว่าไม่ใช่ชื่อ ใช้เฉพาะตอนตีความคำตอบเปล่า ๆ
 # (ทุกคำยาว >= 3 ตัวอักษร เพื่อไม่ให้ไปกินต้นชื่อจริง)
@@ -193,11 +199,15 @@ _NOT_A_NAME_STARTS = (
     "หิว", "ง่วง", "เหนื่อย", "ปวด", "เบื่อ", "ไม่ใช่", "ไม่ได้",
     "ลืม", "จำไม่", "ยังไม่", "ขอเวลา", "แค่", "เปล่า",
     "อยู่", "ขับ", "นั่ง", "นอน", "เพิ่ง", "สบาย", "กำลัง", "เดิน", "กิน",
-    "ทำงาน", "ประชุม", "ยุ่ง", "ว่าง", "รอ", "ฟัง", "พูด", "คิด",
+    "ทำงาน", "ประชุม", "ยุ่ง", "ว่าง", "ฟัง", "พูด", "คิด", "ก็ดี", "เฉย",
+    # ตั้งใจไม่ใส่ "รอ" — "รอฮีม" "รอมฎอน" เป็นชื่อจริง
 )
 
 # คำที่ลงท้ายคำตอบซึ่งบอกว่าเป็นประโยค ไม่ใช่ชื่อ
-_NOT_A_NAME_ENDS = ("อยู่", "แล้ว", "มาก", "จัง", "ครับ", "ค่ะ", "ๆ", "นะ", "ดี")
+#
+# ตั้งใจไม่ใส่ "นะ" กับ "ดี" — มันขัดกับ _NAMES_ENDING_IN_NA ที่อุตส่าห์เก็บ
+# "มานะ" ไว้ แล้วมาโยนทิ้งตรงนี้ และยังกิน "ปรีดี" "สมฤดี" ไปด้วย
+_NOT_A_NAME_ENDS = ("อยู่", "แล้ว", "มาก", "จัง", "ครับ", "ค่ะ", "ๆ")
 
 # สรรพนามบุรุษที่หนึ่งที่คนไทยใส่นำหน้าชื่อเวลาตอบคำถาม "ชื่ออะไร"
 #
@@ -231,8 +241,14 @@ def _gender_from_pronoun(text: str) -> str | None:
     return None
 
 
-def _clean_name(raw: str) -> str | None:
-    """ตัดคำลงท้าย/คำนำหน้าออกจากชื่อที่จับได้ แล้วตรวจว่าน่าเชื่อถือไหม"""
+def _clean_name(raw: str, strict_ambiguous: bool = True) -> str | None:
+    """ตัดคำลงท้าย/คำนำหน้าออกจากชื่อที่จับได้ แล้วตรวจว่าน่าเชื่อถือไหม
+
+    ``strict_ambiguous`` ปฏิเสธชื่อที่ขึ้นต้นด้วยคำกำกวม (แมว เพลง ลูก ยา วง)
+    ใช้เฉพาะกับกฎที่ไม่มีสรรพนามยืนยัน — ไม่งั้น "ดิฉันชื่อลูกปัดค่ะ" ซึ่งเป็น
+    การแนะนำตัวชัดเจนจะถูกทิ้ง แล้วผู้ใช้จะไม่ถูกสร้างตัวตนเลย
+    ลูกปัด ลูกแพร ลูกพีช เป็นชื่อเล่นผู้หญิงไทยที่พบบ่อยที่สุดกลุ่มหนึ่ง
+    """
     name = raw.strip(" .,!?\"'")
 
     # ตัดคำลงท้ายที่ติดมา (วนซ้ำเผื่อซ้อนกัน เช่น "นะครับ")
@@ -282,9 +298,13 @@ def _clean_name(raw: str) -> str | None:
         return None
     if any(name.startswith(prefix) for prefix in _NOT_A_NAME_PREFIXES):
         return None
-    if name not in _AMBIGUOUS_NAME_ALLOW and any(
-        name.startswith(prefix) and name != prefix
-        for prefix in _AMBIGUOUS_NAME_PREFIXES
+    if (
+        strict_ambiguous
+        and name not in _AMBIGUOUS_NAME_ALLOW
+        and any(
+            name.startswith(prefix) and name != prefix
+            for prefix in _AMBIGUOUS_NAME_PREFIXES
+        )
     ):
         return None
     if any(bad in name for bad in _NAME_REJECT_SUBSTRINGS):
@@ -312,9 +332,11 @@ def extract_name_claim(text: str, expecting_name: bool = False) -> str | None:
     """
     if not text:
         return None
-    for pattern in _NAME_PATTERNS:
+    for index, pattern in enumerate(_NAME_PATTERNS):
         for match in pattern.finditer(text):
-            name = _clean_name(match.group(1))
+            name = _clean_name(
+                match.group(1), strict_ambiguous=index == _BARE_PATTERN_INDEX
+            )
             if name:
                 return name
 
@@ -329,7 +351,9 @@ def extract_name_claim(text: str, expecting_name: bool = False) -> str | None:
                     # ก็ได้ แต่ "หนู" เป็นสรรพนามบ่อยกว่าเป็นต้นชื่อมาก
                     body = body[len(pronoun) :]
                     break
-            candidate = _clean_name(body)
+            # บอทเพิ่งถามชื่อไปหมาด ๆ คำตอบจึงเป็นชื่อแน่นอนพอที่จะไม่ต้องเข้ม
+            # กับคำกำกวม ("ลูกปัดค่ะ" คือชื่อ ไม่ใช่ "ลูก" อะไรสักอย่าง)
+            candidate = _clean_name(body, strict_ambiguous=False)
             # คำตอบสั้น ๆ ส่วนใหญ่ไม่ใช่ชื่อ ("ครับ" "ขอโทษ" "ไม่บอก")
             # _clean_name กรองให้ชั้นหนึ่งแล้ว ตรวจซ้ำหลังตัดคำลงท้ายอีกที
             if candidate and _looks_like_a_name(candidate):

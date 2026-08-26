@@ -563,6 +563,12 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
         ทุกความผิดพลาดจะถูกตอบกลับเป็นเหตุการณ์ ``error`` เสมอ ห้ามปิดการเชื่อมต่อ
         เงียบ ๆ เพราะไคลเอนต์จะค้างรอคำตอบที่ไม่มีวันมาตลอดกาล
         """
+        # middleware ของ Starlette ครอบเฉพาะ scope "http" WebSocket จึงต้อง
+        # เช็คเอง ไม่งั้นระหว่างปิดตัวจะรับการเชื่อมต่อแล้วไปพังกับฐานข้อมูล
+        # ที่ปิดไปแล้ว ผู้ใช้เห็นแต่ "การเชื่อมต่อหลุด" โดยไม่รู้สาเหตุ
+        if runtime.closed:
+            await websocket.close(code=1013, reason="เซิร์ฟเวอร์กำลังปิดตัว")
+            return
         await websocket.accept()
         session = runtime.session(websocket.query_params.get("session_id"))
 

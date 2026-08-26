@@ -1019,3 +1019,41 @@ class Testหน่วยที่ตามหลังตัวเลข:
     )
     def test_หน่วยศักราชและตัวย่อ(self, text, expected):
         assert clean_for_speech(text) == expected
+
+
+class Testเบอร์บ้านต่างจังหวัดและช่วงทศนิยม:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # 0XX-XXXXXX คือเบอร์บ้านต่างจังหวัด ไม่ใช่ช่วง 38 ถึง 123456
+            ("ติดต่อ 038-123456 ครับ", "ติดต่อ ศูนย์ สาม แปด หนึ่ง สอง สาม สี่ ห้า หก ครับ"),
+            ("โทร 053-123456", "โทร ศูนย์ ห้า สาม หนึ่ง สอง สาม สี่ ห้า หก"),
+        ],
+    )
+    def test_เบอร์ที่ขึ้นต้นด้วยศูนย์ต้องไม่เป็นช่วง(self, text, expected):
+        assert expand_numbers_for_speech(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        ["น้ำหนัก 1.50-2.30 กิโลกรัม", "เกรดเฉลี่ย 3.00-4.00", "ราคา 1.50-2.30 ดอลลาร์"],
+    )
+    def test_ช่วงทศนิยมต้องไม่กลายเป็นเวลา(self, text):
+        """เลขสองตัวคั่นด้วยขีดไม่ใช่หลักฐานในตัวเองว่าเป็นเวลา"""
+        assert "นาฬิกา" not in expand_numbers_for_speech(text)
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ร้านเปิด 10.00-22.00 น.", "ร้านเปิด สิบนาฬิกาถึงยี่สิบสองนาฬิกา"),
+            ("ตั้งแต่ 9.00 ถึง 17.00", "ตั้งแต่ เก้านาฬิกาถึงสิบเจ็ดนาฬิกา"),
+            ("9:00-17:00", "เก้านาฬิกาถึงสิบเจ็ดนาฬิกา"),
+        ],
+    )
+    def test_ช่วงเวลาจริงยังทำงาน(self, text, expected):
+        assert expand_numbers_for_speech(text) == expected
+
+    def test_เลขยาวเกินขีดจำกัดของ_int_ต้องไม่โยน(self):
+        """Python แปลงสตริงเป็น int ได้ไม่เกิน 4300 หลัก"""
+        for text in ("9" * 5000 + ".50 บาท", "1," + "234," * 2000 + "567"):
+            expand_numbers_for_speech(text)
+            clean_for_speech(text)

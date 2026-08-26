@@ -542,3 +542,31 @@ class Testข้อความสรุปการลบ:
 
         assert "เรื่องเดียว" in done.reply, done.reply
         assert "ศูนย์" not in done.reply
+
+
+class Testติดอยู่ในโหมดรอยืนยัน:
+    """เตือนทุกครั้งที่ตอบไม่ชัด = ผู้ใช้คุยเรื่องอื่นไม่ได้เลยตลอดไป"""
+
+    def test_เตือนได้ครั้งเดียวแล้วต้องปล่อยให้คุยต่อ(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        first = session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+        second = session.exchange("แล้วพรุ่งนี้ล่ะ", speaker=speaker, speak=False)
+
+        assert "ยืนยัน" in first.reply, "ครั้งแรกต้องเตือน"
+        assert "ยืนยัน" not in second.reply, "ครั้งที่สองต้องปล่อยให้โมเดลตอบ"
+        assert session._pending_forget == {}
+        assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
+
+    def test_ยืนยันหลังถูกเตือนยังลบได้(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+        done = session.exchange("ยืนยัน", speaker=speaker, speak=False)
+
+        assert "เรียบร้อยแล้ว" in done.reply
+        assert store.facts_for(speaker.id) == []

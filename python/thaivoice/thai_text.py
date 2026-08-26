@@ -405,7 +405,17 @@ _TIME_DOT = re.compile(r"(?<![\w.:])([01]?\d|2[0-4])\.([0-5]\d)\s*น\.")
 # ว่าทั้งคู่เป็นเวลา ไม่ต้องพึ่งคำแวดล้อม
 _TIME_PART = r"(?:[01]?\d|2[0-4])[.:][0-5]\d"
 _TIME_RANGE = re.compile(
-    rf"(?<![\w.:])({_TIME_PART})\s*(?:-|ถึง|–|—)\s*({_TIME_PART})(?![\d\w])(?:\s*น\.)?"
+    rf"(?<![\w.:])({_TIME_PART})\s*(?:-|ถึง|–|—)\s*({_TIME_PART})(?![\d\w])(\s*น\.)?"
+)
+
+# คำที่บอกว่าเลขคู่นี้เป็นช่วง "เวลา" ไม่ใช่ช่วงปริมาณ
+#
+# การมีเวลาสองตัวคั่นด้วยขีดไม่ใช่หลักฐานในตัวเองอย่างที่เคยคิด — "1.50-2.30
+# กิโลกรัม" "เกรดเฉลี่ย 3.00-4.00" ก็หน้าตาเหมือนกันเป๊ะ ต้องมีอย่างน้อย
+# หนึ่งสัญญาณ: รูปทวิภาค, มี "น." ต่อท้าย, หรือมีคำบอกเวลานำหน้า
+_TIME_RANGE_CONTEXT = re.compile(
+    r"(?:เวลา|ตอน|นัด|เจอกัน|ประชุม|เริ่ม|เลิก|ออก|เปิด|ปิด|สอบ|ทำการ|ตั้งแต่|"
+    r"บ่าย|เช้า|เย็น|ค่ำ|เที่ยง|ดึก|โมง|ทุ่ม|ตี|รอบ|กะ|เวร)"
 )
 
 # คนไทยเขียนเวลาแบบจุดโดยไม่มี "น." บ่อยมาก ("เจอกัน 19.00", "นัดตอน 8.30")
@@ -464,7 +474,9 @@ _THAI_MONTHS = (
 # ระหว่างคำอ่านสองก้อน ซึ่ง TTS กลืนหายไปเฉย ๆ
 # ต้องรับถึงหกหลัก ไม่งั้น "ราคา 10000-20000 บาท" ตกไปให้กฎเบอร์โทรจัดการ
 # ซึ่งเห็นขีดกลางของช่วงเป็นหลักฐานว่าเป็นเบอร์ แล้วอ่านทีละตัวยาวเหยียด
-_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|\d{1,6})"
+# ห้ามขึ้นต้นด้วยศูนย์ — ช่วงตัวเลขไม่มีทางเขียนแบบนั้น แต่เบอร์โทรไทยขึ้นต้น
+# ด้วยศูนย์เสมอ "038-123456" คือเบอร์บ้านต่างจังหวัด ไม่ใช่ช่วง 38 ถึง 123456
+_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|0|[1-9]\d{0,5})"
 _NUMBER_RANGE = re.compile(
     rf"(?<![\w.,-])({_RANGE_TOKEN})\s*-\s*({_RANGE_TOKEN})(?![\d\w,-])"
 )
@@ -531,11 +543,17 @@ _BAHT_SATANG = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})*|\d+)\.(\d{1,2})\s*บ
 _DIGIT_BY_DIGIT_LENGTH = 8
 
 
+# Python แปลงสตริงเป็น int ได้ไม่เกิน 4300 หลัก เกินกว่านั้นโยน ValueError
+# ซึ่งไม่ควรหลุดออกจากฟังก์ชันที่มีหน้าที่แค่ทำข้อความให้อ่านออกเสียงได้
+_MAX_INT_DIGITS = 4000
+
+
 def _speak_quantity(token: str) -> str:
     """อ่านตัวเลขที่รู้แน่ว่าเป็นจำนวน — จุลภาคคือหลักฐานว่าไม่ใช่รหัส"""
-    if "," in token:
-        return thai_number_to_words(int(token.replace(",", "")))
-    return _speak_integer(token)
+    digits = token.replace(",", "")
+    if "," in token and len(digits) <= _MAX_INT_DIGITS:
+        return thai_number_to_words(int(digits))
+    return _speak_integer(digits)
 
 
 def _speak_integer(digits: str) -> str:
@@ -544,6 +562,8 @@ def _speak_integer(digits: str) -> str:
         return read_digits(digits)
     # เลขกลม ๆ ที่ลงท้ายด้วยศูนย์ตั้งแต่สามตัวเป็นจำนวนแน่นอน ไม่ใช่รหัส
     # "ประชากร 70000000 คน" เคยถูกท่องทีละหลักเพราะยาวเกินแปดหลัก
+    if len(digits) > _MAX_INT_DIGITS:
+        return read_digits(digits)
     if len(digits) >= _DIGIT_BY_DIGIT_LENGTH and not digits.endswith("000"):
         return read_digits(digits)
     return thai_number_to_words(int(digits))
@@ -605,14 +625,27 @@ def expand_numbers_for_speech(text: str) -> str:
     text = _SLASH_DATE.sub(_speak_date, text)
 
     def time_range(match: re.Match[str]) -> str:
-        first, second = (re.split(r"[.:]", g) for g in match.groups())
+        if _QUANTITY_UNIT.match(text[match.end() :]):
+            return match.group(0)
+        window = text[max(0, match.start() - 24) : match.start()]
+        is_time = (
+            ":" in match.group(0)
+            or match.group(3)
+            or _TIME_RANGE_CONTEXT.search(window)
+        )
+        if not is_time:
+            return match.group(0)
+        first, second = (re.split(r"[.:]", g) for g in match.groups()[:2])
         return (
             f"{_speak_time(first[0], first[1])}ถึง"
             f"{_speak_time(second[0], second[1])}"
         )
 
     def baht_satang(match: re.Match[str]) -> str:
-        baht = thai_number_to_words(int(match.group(1).replace(",", "")))
+        whole = match.group(1).replace(",", "")
+        if len(whole) > _MAX_INT_DIGITS:
+            return match.group(0)
+        baht = thai_number_to_words(int(whole))
         # ".5" คือห้าสิบสตางค์ ไม่ใช่ห้าสตางค์
         satang = int(match.group(2).ljust(2, "0"))
         if not satang:
@@ -686,7 +719,10 @@ def expand_numbers_for_speech(text: str) -> str:
     def grouped(match: re.Match[str]) -> str:
         # จุลภาคคั่นหลักพันคือหลักฐานว่าเป็น "จำนวน" ไม่ใช่รหัส จึงอ่านเป็นจำนวน
         # เสมอ ไม่ต้องผ่าน _speak_integer ที่จะอ่าน "12,345,678" ทีละตัว
-        spoken = thai_number_to_words(int(match.group(1).replace(",", "")))
+        whole = match.group(1).replace(",", "")
+        if len(whole) > _MAX_INT_DIGITS:
+            return match.group(0)
+        spoken = thai_number_to_words(int(whole))
         if match.group(2):
             spoken += f" จุด {read_digits(match.group(2))}"
         return spoken

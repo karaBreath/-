@@ -436,3 +436,46 @@ class Testคำนำหน้าทางวิชาชีพ:
 
     def test_ชื่อที่ขึ้นต้นคล้ายคำนำหน้าต้องไม่ถูกตัด(self):
         assert extract_name_claim("ผมชื่อคุณากรครับ") == "คุณากร"
+
+
+class Testชื่อเล่นที่ขึ้นต้นด้วยคำกำกวม:
+    """ลูกปัด ลูกแพร ลูกพีช เป็นชื่อเล่นผู้หญิงไทยที่พบบ่อยที่สุดกลุ่มหนึ่ง
+
+    กฎเข้มที่เพิ่มรอบสี่ทิ้งพวกเธอทั้งหมด แม้ในประโยคแนะนำตัวที่ชัดเจน
+    ผู้ใช้จึงไม่ถูกสร้างตัวตนเลย และบอทจะถามชื่อซ้ำทุกเทิร์น
+    """
+
+    @pytest.mark.parametrize(
+        "utterance,name",
+        [
+            ("ดิฉันชื่อลูกปัดค่ะ", "ลูกปัด"),
+            ("หนูชื่อลูกแพรค่ะ", "ลูกแพร"),
+            ("ดิฉันชื่อยาใจค่ะ", "ยาใจ"),
+            ("ผมชื่อวงศ์ครับ", "วงศ์"),
+            ("เรียกผมว่าลูกปัดก็ได้", "ลูกปัด"),
+        ],
+    )
+    def test_มีสรรพนามยืนยันแล้วต้องผ่าน(self, utterance, name):
+        assert extract_name_claim(utterance) == name
+
+    @pytest.mark.parametrize(
+        "utterance", ["ชื่อลูกค้า", "ชื่อเพลงนี้", "ชื่อร้านชัย", "ชื่อหมาผม"]
+    )
+    def test_ไม่มีสรรพนามยืนยันยังต้องถูกปฏิเสธ(self, utterance):
+        assert extract_name_claim(utterance) is None
+
+    def test_ตอนบอทเพิ่งถามชื่อก็ไม่ต้องเข้ม(self):
+        assert extract_name_claim("ลูกปัดค่ะ", expecting_name=True) == "ลูกปัด"
+
+    @pytest.mark.parametrize(
+        "answer,name",
+        [("มานะครับ", "มานะ"), ("ปรีดีครับ", "ปรีดี"), ("รอฮีมครับ", "รอฮีม")],
+    )
+    def test_ชื่อจริงต้องไม่ถูกกฎท้ายคำโยนทิ้ง(self, answer, name):
+        """_clean_name อุตส่าห์เก็บ "มานะ" ไว้ แล้วกฎท้ายคำมาโยนทิ้ง"""
+        assert extract_name_claim(answer, expecting_name=True) == name
+
+    def test_ณัฐต้องไม่ติดนะ(self):
+        """"ณัฐ" "รัฐ" พบบ่อยกว่า "วัฒนะ" มาก"""
+        assert extract_name_claim("ผมชื่อณัฐนะครับ") == "ณัฐ"
+        assert extract_name_claim("ผมชื่อวัฒนะครับ") == "วัฒนะ"
