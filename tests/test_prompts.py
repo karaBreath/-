@@ -130,9 +130,13 @@ class Testกฎภาษาไทยใน_system_prompt:
 
     def test_ต้องบอกสรรพนามของผู้ช่วยให้ตรงเพศกับคำลงท้าย(self):
         """ของเดิมบอกแต่คำลงท้าย โมเดลจึงพูด "ผมจะช่วยดูให้ค่ะ" เป็นประจำ"""
-        assert "ดิฉัน" in base_system("ใจ", "ค่ะ")
-        assert "ผม" in base_system("ใจ", "ครับ")
+        assert '"เรา"' in base_system("ใจ", "ค่ะ")
+        assert '"ผม"' in base_system("ใจ", "ครับ")
 
     def test_คำลงท้ายผู้ชายต้องไม่ถูกสอนกฎของผู้หญิง(self):
         prompt = base_system("ใจ", "ครับ")
-        assert "คะ" not in prompt.replace("ครับ", "")
+        # ยกเว้นบรรทัดที่ยกตัวอย่าง "ผิด" ให้ดู ซึ่งต้องมีทั้งสองเพศ
+        body = "\n".join(
+            line for line in prompt.splitlines() if "ตรงข้าม" not in line
+        )
+        assert "คะ" not in body.replace("ครับ", "")

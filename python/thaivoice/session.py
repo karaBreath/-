@@ -205,11 +205,14 @@ def _address(name: str) -> str:
     return name if name.startswith(_HAS_TITLE) else f"คุณ{name}"
 
 
-def _removed_summary(removed: dict[str, int]) -> str:
+def _removed_summary(removed: dict[str, int], particle: str = "ค่ะ") -> str:
     """สรุปว่าลบอะไรไปบ้าง โดยไม่พูดถึงของที่ไม่มี
 
     ไม่มีคนไทยคนไหนนับศูนย์พร้อมลักษณนาม ("สิ่งที่จำไว้ศูนย์เรื่อง")
     และของที่มีอย่างเดียวก็พูดว่า "เรื่องเดียว" ไม่ใช่ "หนึ่งเรื่อง"
+
+    เมื่อไม่มีอะไรให้ลบ ต้องไม่ขึ้นต้นว่า "ลบให้เรียบร้อยแล้ว" แล้วค่อยบอกว่า
+    ไม่มีอะไร ซึ่งอ่านเหมือนแก้คำพูดตัวเอง
     """
     parts: list[str] = []
     for count, noun, classifier in (
@@ -222,10 +225,15 @@ def _removed_summary(removed: dict[str, int]) -> str:
         amount = f"{classifier}เดียว" if count == 1 else f" {count} {classifier}"
         parts.append(f"{noun}{amount}")
     if not parts:
-        return "จริง ๆ แล้วยังไม่มีอะไรค้างอยู่เลย"
+        return f"ไม่มีอะไรให้ลบอยู่แล้ว{particle}"
+    # สามรายการขึ้นไปต้องมี "ทั้ง" นำทุกตัว ไม่งั้นตัวกลางลอยไม่มีคำเชื่อม
     if len(parts) == 1:
-        return parts[0]
-    return "ทั้ง" + " ".join(parts[:-1]) + " และ" + parts[-1]
+        listed = parts[0]
+    elif len(parts) == 2:
+        listed = f"ทั้ง{parts[0]} และ{parts[1]}"
+    else:
+        listed = "ทั้ง" + " ทั้ง".join(parts[:-1]) + " และ" + parts[-1]
+    return f"ลบ{listed}เรียบร้อยแล้ว{particle}"
 
 
 def _soft(particle: str) -> str:
@@ -491,7 +499,7 @@ class ConversationSession:
                 removed = self.store.forget_everything(speaker.id)
                 log.info("ลบความจำของ speaker %s: %s", speaker.id, removed)
                 return self._say(
-                    f"ลบให้เรียบร้อยแล้ว{particle} {_removed_summary(removed)} "
+                    f"{_removed_summary(removed, particle)} "
                     f"เริ่มรู้จักกันใหม่ได้เลย{particle}",
                     speaker,
                     speak,

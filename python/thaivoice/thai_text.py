@@ -128,10 +128,20 @@ _THAI_UNIT_ABBR = {
     "ซม.": "เซนติเมตร", "ซ.ม.": "เซนติเมตร", "มม.": "มิลลิเมตร",
     "ชม.": "ชั่วโมง", "ช.ม.": "ชั่วโมง", "นาที": "นาที",
     "ลบ.ม.": "ลูกบาศก์เมตร", "ตร.ม.": "ตารางเมตร", "ตร.กม.": "ตารางกิโลเมตร",
-    "บ.": "บาท", "ล้านบ.": "ล้านบาท",
+    "บ.": "บาท", "ล้านบ.": "ล้านบาท", "ม.": "เมตร", "กรัม": "กรัม",
 }
+# ต้องตามหลังตัวเลขเท่านั้น ไม่งั้น "บ.ก. บอกว่า" กลายเป็น "บาท ก. บอกว่า"
 _THAI_UNIT_RE = re.compile(
-    "|".join(re.escape(a) for a in sorted(_THAI_UNIT_ABBR, key=len, reverse=True))
+    # ตามหลังตัวเลข หรือตามหลัง "ต่อ" ที่เพิ่งแปลงมาจากเครื่องหมายทับ
+    r"(?:(?<=\d)|(?<=ต่อ))(\s*)("
+    + "|".join(re.escape(a) for a in sorted(_THAI_UNIT_ABBR, key=len, reverse=True))
+    + r")"
+)
+
+# ตัวย่อศักราช — มาก่อนตัวเลข ไม่ใช่ตามหลัง จึงต้องแยกกฎ
+_ERA_ABBR = {"พ.ศ.": "พุทธศักราช", "ค.ศ.": "คริสต์ศักราช", "ฮ.ศ.": "ฮิจเราะห์ศักราช"}
+_ERA_RE = re.compile(
+    "(?:" + "|".join(re.escape(a) for a in _ERA_ABBR) + r")(?=\s*\d)"
 )
 
 # ตัวย่อเดือนไทย — TTS อ่านเป็นพยางค์เดี่ยว ๆ ("ก. ค.") ซึ่งฟังไม่ออกว่าเดือนอะไร
@@ -188,9 +198,15 @@ def clean_for_speech(text: str, expand_numbers: bool = True) -> str:
     s = s.replace("฿", " บาท ")
     s = re.sub(_CURRENCY_CLASS, " ", s)
 
+    # "50 บาท/กก." อ่านว่า "ห้าสิบบาทต่อกิโลกรัม" — ทับระหว่างคำอ่านไม่ออก
+    s = re.sub(r"(?<=[ก-๙\.])\s*/\s*(?=[ก-๙])", " ต่อ ", s)
+    # TTS ส่วนใหญ่ข้าม "ฯลฯ" ไปเฉย ๆ หรืออ่านเป็นพยางค์
+    s = s.replace("ฯลฯ", " และอื่น ๆ ")
+
     # ตัวย่อเดือนและหน่วยต้องแปลงก่อนแตะจุด ไม่งั้นเหลือ "ก. ค." ให้อ่านทีละพยางค์
     s = _MONTH_ABBR_RE.sub(lambda m: f" {_MONTH_ABBR[m.group(0)]} ", s)
-    s = _THAI_UNIT_RE.sub(lambda m: f" {_THAI_UNIT_ABBR[m.group(0)]} ", s)
+    s = _THAI_UNIT_RE.sub(lambda m: f" {_THAI_UNIT_ABBR[m.group(2)]} ", s)
+    s = _ERA_RE.sub(lambda m: f" {_ERA_ABBR[m.group(0)]} ", s)
 
     # แปลงสัญลักษณ์ที่มีความหมายก่อน แล้วค่อยกรองสัญลักษณ์ที่เหลือทิ้ง
     for symbol, spoken in _SYMBOL_UNITS:
@@ -407,6 +423,27 @@ _TIME_CONTEXT = re.compile(
 # ต้องจับก่อน ไม่งั้นแต่ละกลุ่มจะถูกอ่านเป็นจำนวน ("หนึ่ง-สองร้อยสามสิบสี่-ห้าพัน...")
 _MAYBE_PHONE = re.compile(r"(?<![\w])(\+?\d[\d\- ]{7,17}\d)(?![\w])")
 
+# คำที่ตามหลังตัวเลขแล้วพิสูจน์ว่ามันเป็น "จำนวน" ไม่ใช่รหัสหรือเวลา
+#
+# นี่คือสัญญาณที่เชื่อถือได้ที่สุด และแม่นกว่าการดูคำที่อยู่ *ข้างหน้า* มาก
+# เพราะคำนำหน้าอย่าง "ห้อง" "ตู้" "เที่ยวบิน" "เวลา" "ตี" "ออก" ล้วนเป็นคำ
+# ธรรมดาที่โผล่ในประโยคไหนก็ได้ ("ห้องละ 1500 บาท" ไม่ใช่เลขห้อง
+# "ประชุมใช้เวลา 1.30 ชั่วโมง" ไม่ใช่เวลานาฬิกา) แต่ไม่มีใครเขียนหน่วยวัด
+# ต่อท้ายรหัส
+_QUANTITY_UNIT = re.compile(
+    r"^\s*(?:บาท|สตางค์|ดอลลาร์|ยูโร|เยน|ปอนด์"
+    r"|กรัม|กิโลกรัม|กก\.|ขีด|ตัน|ปอนด์"
+    r"|มิลลิเมตร|เซนติเมตร|ซม\.|เมตร|ม\.|กิโลเมตร|กม\.|ไมล์|นิ้ว|ฟุต|วา|ไร่|งาน"
+    r"|ตารางเมตร|ตร\.ม\.|ลูกบาศก์เมตร|ลิตร|มิลลิลิตร|ซีซี"
+    r"|วินาที|นาที|ชั่วโมง|ชม\.|วัน|สัปดาห์|เดือน|ปี"
+    r"|องศา|เปอร์เซ็นต์|%"
+    r"|คน|ครั้ง|ชิ้น|เล่ม|แผ่น|กล่อง|ถุง|ขวด|แก้ว|จาน|คัน|หลัง"
+    r"|ล้าน|แสน|หมื่น|พัน|ดาว|คะแนน)"
+    # ลักษณนามสั้น ๆ ที่เป็นคำบุพบทได้ด้วย ต้องไม่มีตัวอักษรไทยตามหลัง
+    # ไม่งั้น "เจอกัน 19.00 ที่ร้าน" จะถูกอ่านว่าสิบเก้าที่
+    r"|^\s*(?:ที่|ห้อง|ตัว|ใบ|อัน|เท่า|ปี|วัน|ระดับ)(?![ก-๙])"
+)
+
 # คำนำหน้าที่บอกว่าตัวเลขข้างหลังเป็นรหัสประจำตัว ไม่ใช่จำนวน
 _ID_CONTEXT = re.compile(
     r"(?:เลขบัตร|บัตรประชาชน|บัตรเครดิต|เลขบัญชี|เลขที่บัญชี|บัญชีเลขที่|"
@@ -435,6 +472,10 @@ _SCORE_CONTEXT = re.compile(
     r"(?:คะแนน|สกอร์|ผลบอล|ผลการแข่ง|ผลแข่ง|ชนะ|แพ้|เสมอ)"
 )
 
+# อัตราส่วนที่ใช้ทวิภาค — "1:2" "60:40" ไม่ใช่เวลา แต่ก็ไม่ถูกกฎไหนจับเลย
+# ทวิภาคจึงหลุดถึง TTS ดิบ ๆ ซึ่งเป็นสิ่งที่โมดูลนี้มีไว้เพื่อป้องกัน
+_RATIO_COLON = re.compile(r"(?<![\w.:])(\d{1,4}):(\d{1,4})(?![\d:])")
+
 # เลขที่มีเครื่องหมายทับแต่ไม่ใช่วันที่
 #
 # "ทับ" ใช้กับที่อยู่และเลขห้องเท่านั้น ("บ้านเลขที่ 99/1" "ชั้น 3/1")
@@ -462,7 +503,9 @@ _CODE_NUMBER = re.compile(
     r"|โทร|สายด่วน|ไปรษณีย์|ตู้ ?ปณ|เลขที่|OTP|otp|พัสดุ)"
     # คำที่คั่นได้ต้องเป็นส่วนของคำนามประสม ("ห้องประชุม" "รหัสพนักงาน")
     # ไม่ใช่คำเชื่อมที่เปิดอนุประโยค ("โต๊ะที่นั่งกันเมื่อวาน 1234" ไม่ใช่รหัสโต๊ะ)
-    r"((?:(?!ที่|กัน|เมื่อ|ของ|ใน|และ|แล้ว|นี้|นั้น|คือ|เป็น|กับ)[ก-๙]){0,12})"
+    # กันเฉพาะตอน *ขึ้นต้น* สะพาน ไม่ใช่ทุกตำแหน่ง ไม่งั้น "เบอร์ภายใน 1234"
+    # ก็โดนไปด้วย เพราะ "ภายใน" มี "ใน" อยู่ข้างใน
+    r"((?!ที่|กัน|เมื่อ|ของ|ใน|และ|แล้ว|นี้|นั้น|คือ|เป็น|กับ|ละ)[ก-๙]{0,12})"
     r"\s*(\d{3,6})(?![\d\w/])"
 )
 
@@ -481,7 +524,8 @@ _STANDALONE_NUMBER = re.compile(
 #
 # "1,234.50 บาท" อ่านว่า "หนึ่งพันสองร้อยสามสิบสี่บาทห้าสิบสตางค์"
 # ไม่ใช่ "จุดห้าศูนย์บาท" ซึ่งฟังออกทันทีว่าเครื่องอ่าน
-_BAHT_SATANG = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*บาท")
+# รับทศนิยมหนึ่งหรือสองตำแหน่ง — "99.5 บาท" คือเก้าสิบเก้าบาทห้าสิบสตางค์
+_BAHT_SATANG = re.compile(r"(?<![\w.,])(\d{1,3}(?:,\d{3})*|\d+)\.(\d{1,2})\s*บาท")
 
 # ยาวขนาดนี้คนไทยอ่านทีละตัว ไม่อ่านเป็นจำนวน
 _DIGIT_BY_DIGIT_LENGTH = 8
@@ -496,7 +540,11 @@ def _speak_quantity(token: str) -> str:
 
 def _speak_integer(digits: str) -> str:
     """อ่านสตริงตัวเลข — ยาวหรือขึ้นต้นด้วยศูนย์ให้อ่านทีละตัว"""
-    if (digits.startswith("0") and len(digits) > 1) or len(digits) >= _DIGIT_BY_DIGIT_LENGTH:
+    if digits.startswith("0") and len(digits) > 1:
+        return read_digits(digits)
+    # เลขกลม ๆ ที่ลงท้ายด้วยศูนย์ตั้งแต่สามตัวเป็นจำนวนแน่นอน ไม่ใช่รหัส
+    # "ประชากร 70000000 คน" เคยถูกท่องทีละหลักเพราะยาวเกินแปดหลัก
+    if len(digits) >= _DIGIT_BY_DIGIT_LENGTH and not digits.endswith("000"):
         return read_digits(digits)
     return thai_number_to_words(int(digits))
 
@@ -565,7 +613,8 @@ def expand_numbers_for_speech(text: str) -> str:
 
     def baht_satang(match: re.Match[str]) -> str:
         baht = thai_number_to_words(int(match.group(1).replace(",", "")))
-        satang = int(match.group(2))
+        # ".5" คือห้าสิบสตางค์ ไม่ใช่ห้าสตางค์
+        satang = int(match.group(2).ljust(2, "0"))
         if not satang:
             return f"{baht}บาทถ้วน"
         return f"{baht}บาท{thai_number_to_words(satang)}สตางค์"
@@ -576,6 +625,10 @@ def expand_numbers_for_speech(text: str) -> str:
     text = _TIME_COLON.sub(lambda m: _speak_time(m.group(1), m.group(2)), text)
 
     def bare_time(match: re.Match[str]) -> str:
+        # หน่วยที่ตามหลังชนะคำแวดล้อมเสมอ — "ประชุมใช้เวลา 1.30 ชั่วโมง"
+        # ไม่ใช่เวลานาฬิกา และ "เริ่มต้นที่ 1.20 เมตร" ก็ไม่ใช่
+        if _QUANTITY_UNIT.match(text[match.end() :]):
+            return match.group(0)
         window = text[max(0, match.start() - 24) : match.start()]
         if _TIME_CONTEXT.search(window):
             return _speak_time(match.group(1), match.group(2))
@@ -599,16 +652,23 @@ def expand_numbers_for_speech(text: str) -> str:
     # เพราะมีขีดกลางอยู่ แล้วอ่านทีละตัวยาวเหยียด
     text = _NUMBER_RANGE.sub(range_or_score, text)
     text = _MAYBE_PHONE.sub(phone, text)
-    text = _CODE_NUMBER.sub(
-        lambda m: f"{m.group(1)}{m.group(2)} {read_digits(m.group(3))}", text
-    )
+    def code_number(match: re.Match[str]) -> str:
+        # หน่วยที่ตามหลังพิสูจน์ว่าเป็นจำนวน ("ห้องละ 1500 บาท" ไม่ใช่เลขห้อง)
+        if _QUANTITY_UNIT.match(text[match.end() :]):
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)} {read_digits(match.group(3))}"
+
+    text = _CODE_NUMBER.sub(code_number, text)
 
     def slash_pair(match: re.Match[str]) -> str:
         window = text[max(0, match.start() - 24) : match.start()]
         left, right = _speak_integer(match.group(1)), _speak_integer(match.group(2))
         if _ADDRESS_CONTEXT.search(window):
             return f"{left}ทับ{right}"
-        # ไม่ใช่ที่อยู่ก็เป็นเศษส่วนหรือคะแนน ซึ่งภาษาไทยใช้ "ส่วน"
+        # คะแนนสอบพูดว่า "สิบแปดจากยี่สิบ" ไม่ใช่ "สิบแปดส่วนยี่สิบ"
+        # ซึ่งเป็นการอ่านเศษส่วนทางคณิตศาสตร์
+        if _SCORE_CONTEXT.search(window) or _QUANTITY_UNIT.match(text[match.end() :]):
+            return f"{left}จาก{right}"
         return f"{left}ส่วน{right}"
 
     def day_month(match: re.Match[str]) -> str:
@@ -617,6 +677,9 @@ def expand_numbers_for_speech(text: str) -> str:
             return match.group(0)
         return f" {thai_number_to_words(day)} {_THAI_MONTHS[month]}"
 
+    text = _RATIO_COLON.sub(
+        lambda m: f"{_speak_integer(m.group(1))}ต่อ{_speak_integer(m.group(2))}", text
+    )
     text = _SLASH_DAY_MONTH.sub(day_month, text)
     text = _SLASH_PAIR.sub(slash_pair, text)
 

@@ -113,7 +113,7 @@
   <aside>
     <div class="panel">
       <h2>กำลังคุยกับ</h2>
-      <div id="speakerBox"><p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลย</p></div>
+      <div id="speakerBox"><p class="empty">ยังไม่รู้ว่าคุณเป็นใคร — ลองบอกชื่อดูได้เลยค่ะ</p></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <h2>สิ่งที่จำได้เกี่ยวกับคุณ</h2>
@@ -210,7 +210,7 @@ async function refreshSpeaker(speaker) {
   name.style.fontWeight = "600";
   speakerBox.append(
     name,
-    el("div", "empty", `คำลงท้ายที่คุณใช้: ${speaker.particle ?? "-"} · คุยกันมาแล้ว ${speaker.turns ?? 0} ข้อความ`),
+    el("div", "empty", `คุยกันมาแล้ว ${speaker.turns ?? 0} ข้อความ`),
   );
   forgetBtn.disabled = false;
 
@@ -250,7 +250,7 @@ const handlers = {
     if (speaker) {
       const how = method === "voice" ? `จำเสียงได้ (${(score ?? 0).toFixed(2)})`
                 : method === "name" ? "รู้จากชื่อที่บอก" : "คนเดิมในบทสนทนานี้";
-      addTurn("ระบบ", `กำลังคุยกับ ${speaker.name} — ${how}`);
+      addTurn("ระบบ", `กำลังคุยกับคุณ${speaker.name} — ${how}`);
     }
     void refreshSpeaker(speaker);
   },
@@ -351,14 +351,14 @@ document.getElementById("textinput").addEventListener("keydown", (event) => {
 forgetBtn.addEventListener("click", async () => {
   if (!currentSpeaker) return;
   if (!confirm(
-    `ลบความจำทั้งหมดเกี่ยวกับ ${currentSpeaker.name} ใช่ไหม\n\n` +
+    `ลบความจำทั้งหมดเกี่ยวกับคุณ${currentSpeaker.name} ใช่ไหม\n\n` +
     "ทั้งสิ่งที่จำไว้ บทสรุป และบทสนทนาเก่า ลบแล้วกู้คืนไม่ได้\n" +
     "(ลายเสียงที่ใช้จำว่าคุณเป็นใครจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี)"
   )) return;
   try {
     const removed = await client.forgetMemory(currentSpeaker.id);
     const total = removed.facts + removed.summaries + removed.turns;
-    addTurn("ระบบ", `ลบความจำไปแล้วทั้งหมด ${total} รายการ (สิ่งที่จำไว้ ${removed.facts}, บทสรุป ${removed.summaries}, บทสนทนา ${removed.turns})`);
+    addTurn("ระบบ", `ลบความจำทั้งหมด ${total} รายการแล้ว (สิ่งที่จำไว้ ${removed.facts}, บทสรุป ${removed.summaries}, บทสนทนา ${removed.turns})`);
     await refreshSpeaker(currentSpeaker);
   } catch (error) {
     addTurn("ระบบ", `ลบความจำไม่สำเร็จ: ${error.message}`);

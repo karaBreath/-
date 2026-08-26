@@ -321,7 +321,8 @@ def cmd_memory(args: argparse.Namespace) -> int:
     stats = store.stats(speaker.id)
     _p(f"{BOLD}{speaker.call_name}{RESET} {DIM}(id={speaker.id}){RESET}")
     _p(f"  ชื่อเต็ม: {speaker.display_name}")
-    _p(f"  คำลงท้าย: {speaker.particle or '-'} · เพศที่เดาไว้: {speaker.gender or '-'}")
+    gender = {"male": "ชาย", "female": "หญิง"}.get(speaker.gender or "", "ยังไม่รู้")
+    _p(f"  คำลงท้าย: {speaker.particle or '-'} · เพศที่เดาไว้: {gender}")
     _p(f"  คุยกันมาแล้ว {stats.turns} ข้อความ · จำข้อเท็จจริงไว้ {stats.facts} ข้อ")
     _p(f"  ลายเสียง: {'มี' if store.has_voiceprint(speaker.id, 'resemblyzer') else 'ยังไม่มี'}")
 

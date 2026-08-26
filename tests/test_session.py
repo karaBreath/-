@@ -211,7 +211,7 @@ class TestForgetCommand:
         session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
         done = session.exchange("ยืนยัน", speaker=speaker, speak=False)
 
-        assert "ลบให้เรียบร้อยแล้ว" in done.reply
+        assert "เรียบร้อยแล้ว" in done.reply
         assert store.facts_for(speaker.id) == []
         assert store.latest_summary(speaker.id) is None, "บทสรุปต้องถูกลบด้วย"
         assert all(
@@ -254,7 +254,7 @@ class TestForgetCommand:
         session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
         done = session.exchange("ยืนยัน", speaker=speaker, speak=False)
 
-        assert "ลบให้เรียบร้อยแล้ว" in done.reply
+        assert "เรียบร้อยแล้ว" in done.reply
         assert store.facts_for(speaker.id) == []
 
     def test_ขอลบใหม่หลังคำขอเก่าหมดอายุต้องไม่ถูกกลืน(self, session, store):
@@ -293,7 +293,7 @@ class TestForgetCommand:
 
         # คนแรกพูดตามที่บอทบอก ต้องได้ผลจริง
         done = session.exchange("ยืนยัน", speaker=a, speak=False)
-        assert "ลบให้เรียบร้อยแล้ว" in done.reply
+        assert "เรียบร้อยแล้ว" in done.reply
         assert store.facts_for(a.id) == []
         assert store.facts_for(b.id), "ของคนที่สองต้องไม่ถูกลบไปด้วย"
 
@@ -515,11 +515,19 @@ class Testข้อความสรุปการลบ:
     @pytest.mark.parametrize(
         "removed,expected",
         [
-            ({"facts": 0, "summaries": 0, "turns": 0}, "จริง ๆ แล้วยังไม่มีอะไรค้างอยู่เลย"),
-            ({"facts": 1, "summaries": 0, "turns": 0}, "สิ่งที่จำไว้เรื่องเดียว"),
+            # ไม่มีอะไรให้ลบ ต้องไม่ขึ้นต้นว่า "ลบให้เรียบร้อยแล้ว" แล้วค่อยบอกว่า
+            # ไม่มีอะไร ซึ่งอ่านเหมือนแก้คำพูดตัวเอง
+            ({"facts": 0, "summaries": 0, "turns": 0}, "ไม่มีอะไรให้ลบอยู่แล้วค่ะ"),
+            ({"facts": 1, "summaries": 0, "turns": 0}, "ลบสิ่งที่จำไว้เรื่องเดียวเรียบร้อยแล้วค่ะ"),
             (
                 {"facts": 3, "summaries": 0, "turns": 40},
-                "ทั้งสิ่งที่จำไว้ 3 เรื่อง และบทสนทนาเก่า 40 ข้อความ",
+                "ลบทั้งสิ่งที่จำไว้ 3 เรื่อง และบทสนทนาเก่า 40 ข้อความเรียบร้อยแล้วค่ะ",
+            ),
+            # สามรายการต้องมี "ทั้ง" นำทุกตัว ไม่งั้นตัวกลางลอยไม่มีคำเชื่อม
+            (
+                {"facts": 3, "summaries": 1, "turns": 12},
+                "ลบทั้งสิ่งที่จำไว้ 3 เรื่อง ทั้งบทสรุปชุดเดียว"
+                " และบทสนทนาเก่า 12 ข้อความเรียบร้อยแล้วค่ะ",
             ),
         ],
     )

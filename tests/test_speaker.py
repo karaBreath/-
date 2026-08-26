@@ -417,3 +417,22 @@ class Testคำตอบที่เป็นประโยคไม่ใช�
     @pytest.mark.parametrize("answer", ["O'Brien", "Anne-Marie", "มิ้น"])
     def test_ชื่อที่มีเครื่องหมายในตัวยังผ่าน(self, answer):
         assert extract_name_claim(answer, expecting_name=True) == answer
+
+
+class Testคำนำหน้าทางวิชาชีพ:
+    """"คุณดร.สมชาย" ผิดหลักภาษา และ TTS อ่าน "ดร." ทีละตัวอักษร"""
+
+    @pytest.mark.parametrize(
+        "utterance,name",
+        [
+            ("ผมชื่อดร.สมชายครับ", "สมชาย"),
+            ("ผมชื่อผศ.ดร.สมชายครับ", "สมชาย"),
+            ("ผมชื่อนพ.สมชายครับ", "สมชาย"),
+            ("หนูชื่อพญ.มาลีค่ะ", "มาลี"),
+        ],
+    )
+    def test_ตัดคำนำหน้าออก(self, utterance, name):
+        assert extract_name_claim(utterance) == name
+
+    def test_ชื่อที่ขึ้นต้นคล้ายคำนำหน้าต้องไม่ถูกตัด(self):
+        assert extract_name_claim("ผมชื่อคุณากรครับ") == "คุณากร"
