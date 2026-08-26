@@ -67,28 +67,57 @@ def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1) -> bytes:
     return buf.getvalue()
 
 
+# ค่าที่เกินจากนี้ไม่ใช่เสียงพูดจากไมโครโฟนแล้ว
+MAX_CHANNELS = 8
+MIN_SAMPLE_RATE = 4000
+MAX_SAMPLE_RATE = 192000
+
+
 def wav_to_pcm(data: bytes) -> tuple[bytes, int]:
-    """แกะไฟล์ WAV เป็น (PCM 16-bit mono, sample_rate)"""
+    """แกะไฟล์ WAV เป็น (PCM 16-bit mono, sample_rate)
+
+    ตรวจค่าหัวไฟล์ให้ครบก่อนใช้งาน ไฟล์ที่ไม่มีเฟรมเลยหรือมีช่องสัญญาณเป็นร้อย
+    ผ่านเข้ามาได้ง่ายมาก และเสียงเงียบสนิททำให้ตัวสร้างลายเสียงคืนค่า NaN ซึ่ง
+    เคยทำให้ระบบจำเสียงใครไม่ได้เลยทั้งระบบ
+    """
     with wave.open(io.BytesIO(data), "rb") as wf:
         channels = wf.getnchannels()
         width = wf.getsampwidth()
         rate = wf.getframerate()
         frames = wf.readframes(wf.getnframes())
+
     if width != 2:
         raise ValueError(f"รองรับเฉพาะ PCM 16-bit ไม่ใช่ {width * 8}-bit")
+    if channels < 1 or channels > MAX_CHANNELS:
+        raise ValueError(f"จำนวนช่องสัญญาณไม่สมเหตุสมผล: {channels}")
+    if not (MIN_SAMPLE_RATE <= rate <= MAX_SAMPLE_RATE):
+        raise ValueError(f"อัตราสุ่มตัวอย่างไม่สมเหตุสมผล: {rate}")
+    if not frames:
+        raise ValueError("ไฟล์เสียงไม่มีข้อมูลเลย")
+
     if channels > 1:  # รวมช่องสัญญาณเป็น mono
         import array
 
         samples = array.array("h")
         samples.frombytes(frames)
-        mono = array.array(
-            "h",
-            [
-                sum(samples[i : i + channels]) // channels
-                for i in range(0, len(samples), channels)
-            ],
-        )
-        frames = mono.tobytes()
+        try:
+            import numpy as np  # type: ignore
+
+            matrix = np.frombuffer(frames, dtype=np.int16).reshape(-1, channels)
+            # ใช้หารปัดลงเหมือนเส้นทางสำรอง และขยายเป็น int32 ก่อนบวกกันล้น
+            # (np.mean ปัดเข้าหาศูนย์ ทำให้ค่าติดลบต่างจากเส้นทางสำรองหนึ่งหน่วย)
+            averaged = matrix.astype(np.int32).sum(axis=1) // channels
+            frames = averaged.astype(np.int16).tobytes()
+        except Exception:
+            # ไม่มี numpy ก็ยังทำงานได้ เพียงแต่ช้ากว่า
+            mono = array.array(
+                "h",
+                [
+                    sum(samples[i : i + channels]) // channels
+                    for i in range(0, len(samples), channels)
+                ],
+            )
+            frames = mono.tobytes()
     return frames, rate
 
 

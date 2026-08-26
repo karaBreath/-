@@ -494,7 +494,9 @@ def _cluster_safe_cut(text: str, index: int) -> int:
         i -= 1
     while i > 0 and text[i - 1] in _LEADING_VOWELS:
         i -= 1
-    return i
+    # ถ้าถอยจนถึงต้นข้อความ แปลว่าทั้งช่วงเป็นเครื่องหมายผสมล้วน (ข้อความที่จงใจ
+    # ซ้อนวรรณยุกต์เป็นร้อยตัว) ให้ตัดตรงจุดเดิมแทน ไม่งั้นจะไม่มีความคืบหน้าเลย
+    return i if i > 0 else index
 
 
 def _word_safe_cut(text: str, low: int, high: int) -> int:
@@ -526,7 +528,8 @@ def _word_safe_cut(text: str, low: int, high: int) -> int:
                 return best
         except Exception:
             pass
-    return _cluster_safe_cut(text, high)
+    # จุดตัดต้องมากกว่า 0 เสมอ ไม่งั้นผู้เรียกจะตัดข้อความไม่ออกและวนไม่จบ
+    return max(1, _cluster_safe_cut(text, high))
 
 
 class SpeechChunker:
@@ -559,6 +562,10 @@ class SpeechChunker:
             cut = self._find_cut(self._buf)
             if cut is None:
                 return
+            # ตาข่ายกันวนไม่จบ: จุดตัดต้องเดินหน้าอย่างน้อยหนึ่งตัวอักษรเสมอ
+            # ถ้าจุดตัดเป็นศูนย์ บัฟเฟอร์จะไม่สั้นลง แล้วลูปนี้จะหมุนตลอดกาล
+            # (เกิดได้จริงกับข้อความที่ซ้อนวรรณยุกต์ไทยติดกันเป็นร้อยตัว)
+            cut = max(1, min(cut, len(self._buf)))
             chunk, self._buf = self._buf[:cut].strip(), self._buf[cut:].lstrip()
             if chunk:
                 yield chunk

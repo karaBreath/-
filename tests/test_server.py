@@ -381,3 +381,93 @@ class TestWebSocket:
         assert events[0]["type"] == "speaker"
         assert events[1]["type"] == "error"
         assert "โมเดลล่ม" in events[1]["text"]
+
+
+class TestWavValidation:
+    """ตรวจหัวไฟล์เสียงให้ครบก่อนใช้ — ไฟล์แปลก ๆ ผ่านเข้ามาได้ง่ายกว่าที่คิด"""
+
+    def _wav_header(self, channels: int, rate: int, width: int, frames: bytes) -> bytes:
+        import io
+        import wave
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(width)
+            wf.setframerate(rate)
+            wf.writeframes(frames)
+        return buffer.getvalue()
+
+    @pytest.mark.parametrize(
+        "channels,rate,width,frames,reason",
+        [
+            (1, 16000, 2, b"", "ไม่มีเฟรมเลย"),
+            (64, 16000, 2, b"\x00" * 256, "ช่องสัญญาณเยอะเกิน"),
+            (1, 1, 2, b"\x00" * 64, "อัตราสุ่มตัวอย่างต่ำเกิน"),
+            (1, 16000, 1, b"\x00" * 64, "ไม่ใช่ 16-bit"),
+        ],
+    )
+    def test_ไฟล์เสียงผิดปกติถูกปฏิเสธ(self, client, channels, rate, width, frames, reason):
+        data = self._wav_header(channels, rate, width, frames)
+        response = client.post(
+            "/api/voice",
+            files={"audio": ("u.wav", data, "audio/wav")},
+            data={"transcript": "สวัสดี"},
+        )
+        assert 400 <= response.status_code < 500, f"{reason}: {response.status_code}"
+
+    def test_สเตอริโอถูกรวมเป็นโมโนถูกต้อง(self):
+        import array
+
+        from thaivoice.stt import wav_to_pcm
+
+        # ซ้ายเป็น 1000 ขวาเป็น 2000 ตลอด -> โมโนต้องได้ 1500
+        interleaved = array.array("h", [1000, 2000] * 100).tobytes()
+        data = self._wav_header(2, 16000, 2, interleaved)
+        pcm, rate = wav_to_pcm(data)
+
+        mono = array.array("h")
+        mono.frombytes(pcm)
+        assert rate == 16000
+        assert len(mono) == 100
+        assert all(value == 1500 for value in mono), mono[:5]
+
+
+    def test_รวมช่องสัญญาณได้ผลเท่ากันทั้งมีและไม่มี_numpy(self):
+        """สองเส้นทางต้องให้ผลตรงกันเป๊ะ
+
+        np.mean ปัดเข้าหาศูนย์ ส่วนการหารจำนวนเต็มของ Python ปัดลง ค่าติดลบจึง
+        ต่างกันหนึ่งหน่วยถ้าไม่ระวัง ซึ่งแปลว่าลายเสียงที่คำนวณได้จะไม่เหมือนกัน
+        ระหว่างเครื่องที่ติดตั้ง numpy กับที่ไม่ได้ติดตั้ง
+        """
+        import array
+        import builtins
+
+        from thaivoice.stt import wav_to_pcm
+
+        pytest.importorskip("numpy", reason="ต้องมี numpy จึงจะเทียบสองเส้นทางได้")
+
+        interleaved = array.array(
+            "h", [-1, 0, -1, -1, 32767, 32767, 32767, 32767, -3, 0, 0, 0] * 20
+        ).tobytes()
+        data = self._wav_header(4, 16000, 2, interleaved)
+
+        def decode(with_numpy: bool) -> list[int]:
+            real_import = builtins.__import__
+            if not with_numpy:
+
+                def blocked(name, *args, **kwargs):
+                    if name == "numpy":
+                        raise ImportError("ปิดไว้เพื่อทดสอบเส้นทางสำรอง")
+                    return real_import(name, *args, **kwargs)
+
+                builtins.__import__ = blocked
+            try:
+                pcm, _rate = wav_to_pcm(data)
+            finally:
+                builtins.__import__ = real_import
+            samples = array.array("h")
+            samples.frombytes(pcm)
+            return list(samples)
+
+        assert decode(True) == decode(False)

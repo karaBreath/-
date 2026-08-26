@@ -422,3 +422,40 @@ def test_ท่อนสุดท้ายที่สั้นถูกรว�
     # ไม่งั้น "ครับ" จะถูกพูดเดี่ยว ๆ ห้อยท้าย
     parts = split_sentences("วันนี้อากาศดีมากเลยนะ ครับ")
     assert parts[-1] != "ครับ"
+
+
+class TestChunkerNeverHangs:
+    """ตัวตัดท่อนต้องคืบหน้าเสมอ ไม่งั้นเธรดจะหมุนอยู่กับที่ตลอดกาล
+
+    เคยพังจริงกับข้อความที่ซ้อนวรรณยุกต์ไทยติดกันเป็นร้อยตัว: จุดตัดถูกเลื่อนถอย
+    หลังจนถึงศูนย์ บัฟเฟอร์ไม่สั้นลง แล้ว feed() ก็หมุนไม่จบ ซึ่งแขวนทั้งคำขอ
+    """
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            "ก" + "่" * 300 + "ข" * 50,
+            "่" * 500,
+            "เ" * 400,
+            "เเเเ" + "้" * 200 + "ก" * 100,
+            "​" * 300 + "สวัสดี",
+        ],
+    )
+    def test_ข้อความประหลาดต้องไม่ทำให้วนไม่จบ(self, evil):
+        chunker = SpeechChunker(min_chars=20, max_chars=60)
+        chunks = []
+        for index, chunk in enumerate(chunker.feed(evil)):
+            chunks.append(chunk)
+            assert index < 2000, "ปล่อยท่อนออกมาไม่หยุด — น่าจะวนไม่จบ"
+        chunks.extend(chunker.flush())
+        assert "".join(chunks).replace(" ", "") == evil.replace(" ", "")
+
+    def test_ข้อความยาวมากยังทำงานเร็ว(self):
+        import time
+
+        chunker = SpeechChunker()
+        start = time.time()
+        chunks = list(chunker.feed("สวัสดีครับ วันนี้อากาศดีมาก " * 2000))
+        chunks.extend(chunker.flush())
+        assert time.time() - start < 5.0
+        assert chunks
