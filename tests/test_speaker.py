@@ -479,3 +479,53 @@ class Testชื่อเล่นที่ขึ้นต้นด้วยค�
         """"ณัฐ" "รัฐ" พบบ่อยกว่า "วัฒนะ" มาก"""
         assert extract_name_claim("ผมชื่อณัฐนะครับ") == "ณัฐ"
         assert extract_name_claim("ผมชื่อวัฒนะครับ") == "วัฒนะ"
+
+
+class Testสำนวนอธิบายไม่ใช่การแนะนำตัว:
+    """"เรียกว่า" เป็นสำนวนอธิบายที่ใช้บ่อยที่สุดสำนวนหนึ่งในภาษาไทย
+
+    รอบห้าผ่อนการกันคำกำกวมให้ทุกกฎที่ไม่ใช่กฎ "ชื่อX" เปล่า ๆ ซึ่งรวมกฎ
+    "เรียกว่า" ที่ไม่มีสรรพนามยืนยันเข้าไปด้วย
+    """
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "โรคนี้เรียกว่าโรคเบาหวานครับ",
+            "เพลงนี้เรียกว่าเพลงลูกทุ่งครับ",
+            "ที่นี่เรียกว่าถนนข้าวสารครับ",
+        ],
+    )
+    def test_ต้องไม่กลายเป็นชื่อคน(self, utterance):
+        assert extract_name_claim(utterance) is None
+
+    @pytest.mark.parametrize(
+        "utterance,name",
+        [
+            ("เรียกผมว่าเดชก็ได้", "เดช"),
+            ("เรียกผมว่าลูกปัดก็ได้", "ลูกปัด"),
+            ("เรียกว่าโบทครับ", "โบท"),
+            ("เรียกผมว่าอาทิตย์ก็ได้ครับ", "อาทิตย์"),
+        ],
+    )
+    def test_การแนะนำตัวจริงยังผ่าน(self, utterance, name):
+        assert extract_name_claim(utterance) == name
+
+
+class Testคำบอกลาไม่ใช่ชื่อ:
+    """รอบห้าถอด "นะ" ออกจากบัญชีคำท้ายเพื่อกู้ "มานะ" แล้วเปิดประตูให้
+    ทุกคำตอบสั้นที่ลงท้ายแบบนั้นกลายเป็นชื่อ"""
+
+    @pytest.mark.parametrize(
+        "answer", ["ไว้ก่อนนะ", "โชคดีนะ", "พรุ่งนี้นะ", "สักครู่นะ", "ไปก่อนนะ"]
+    )
+    def test_ต้องถูกปฏิเสธ(self, answer):
+        assert extract_name_claim(answer, expecting_name=True) is None
+
+    @pytest.mark.parametrize("answer", ["มานะ", "ปรีดี", "ณัฐ", "ลูกปัด", "เดช"])
+    def test_ชื่อจริงยังผ่าน(self, answer):
+        assert extract_name_claim(answer, expecting_name=True) == answer
+
+    def test_ทางลัดของตัวตัดคำนำหน้าต้องไม่ข้ามด่านตรวจ(self):
+        """`return None if "." in title else name` ข้ามการตรวจความยาวและคำต้องห้าม"""
+        assert extract_name_claim("คุณาไม่ว่างค่ะ", expecting_name=True) is None

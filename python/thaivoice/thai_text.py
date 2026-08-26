@@ -527,7 +527,9 @@ _THAI_MONTHS = (
 # ซึ่งเห็นขีดกลางของช่วงเป็นหลักฐานว่าเป็นเบอร์ แล้วอ่านทีละตัวยาวเหยียด
 # ห้ามขึ้นต้นด้วยศูนย์ — ช่วงตัวเลขไม่มีทางเขียนแบบนั้น แต่เบอร์โทรไทยขึ้นต้น
 # ด้วยศูนย์เสมอ "038-123456" คือเบอร์บ้านต่างจังหวัด ไม่ใช่ช่วง 38 ถึง 123456
-_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|0|[1-9]\d{0,5})"
+# ห้ามขึ้นต้นด้วยศูนย์ *แล้วยาวเกินสองหลัก* — ช่วงวันที่เขียน "05-10" ได้ปกติ
+# แต่ "038-123456" คือเบอร์บ้านต่างจังหวัด ไม่ใช่ช่วง 38 ถึง 123456
+_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|0\d?|[1-9]\d{0,5})"
 _NUMBER_RANGE = re.compile(
     rf"(?<![\w.,-])({_RANGE_TOKEN})\s*-\s*({_RANGE_TOKEN})(?![\d\w,-])"
 )
@@ -604,6 +606,14 @@ _DIGIT_BY_DIGIT_LENGTH = 8
 _MAX_INT_DIGITS = 4000
 
 
+def _speak_decimal(token: str) -> str:
+    """อ่านเลขที่ใช้จุดหรือทวิภาคคั่น เช่น "1.50" -> "หนึ่ง จุด ห้า ศูนย์" """
+    parts = re.split(r"[.:]", token, maxsplit=1)
+    if len(parts) == 1 or not parts[1]:
+        return _speak_integer(parts[0])
+    return f"{_speak_integer(parts[0])} จุด {read_digits(parts[1])}"
+
+
 def _speak_quantity(token: str) -> str:
     """อ่านตัวเลขที่รู้แน่ว่าเป็นจำนวน — จุลภาคคือหลักฐานว่าไม่ใช่รหัส"""
     digits = token.replace(",", "")
@@ -612,15 +622,26 @@ def _speak_quantity(token: str) -> str:
     return _speak_integer(digits)
 
 
+def _is_round_number(digits: str) -> bool:
+    """จำนวนกลม ๆ อย่าง 70000000 หรือ 12500000 — ไม่ใช่รหัสแน่นอน
+
+    เกณฑ์: ศูนย์ท้ายต้องมีมากกว่าครึ่งของความยาว ("70000000" ศูนย์เจ็ดตัวจาก
+    แปดหลัก) รหัสอ้างอิงอย่าง "98765000" ศูนย์แค่สามจากแปด จึงไม่ผ่าน
+    """
+    trailing = len(digits) - len(digits.rstrip("0"))
+    return trailing * 2 > len(digits)
+
+
 def _speak_integer(digits: str) -> str:
     """อ่านสตริงตัวเลข — ยาวหรือขึ้นต้นด้วยศูนย์ให้อ่านทีละตัว"""
     if digits.startswith("0") and len(digits) > 1:
         return read_digits(digits)
-    # เลขกลม ๆ ที่ลงท้ายด้วยศูนย์ตั้งแต่สามตัวเป็นจำนวนแน่นอน ไม่ใช่รหัส
-    # "ประชากร 70000000 คน" เคยถูกท่องทีละหลักเพราะยาวเกินแปดหลัก
+    # เลขกลม ๆ เป็นจำนวนแน่นอน ไม่ใช่รหัส ("ประชากร 70000000 คน" เคยถูกท่อง
+    # ทีละหลักเพราะยาวเกินแปดหลัก) แต่ต้องกลมจริง ๆ — ลงท้ายด้วยศูนย์สามตัว
+    # เฉย ๆ ไม่พอ เพราะ "66812345000" คือเบอร์มือถือที่เขียนรหัสประเทศนำ
     if len(digits) > _MAX_INT_DIGITS:
         return read_digits(digits)
-    if len(digits) >= _DIGIT_BY_DIGIT_LENGTH and not digits.endswith("000"):
+    if len(digits) >= _DIGIT_BY_DIGIT_LENGTH and not _is_round_number(digits):
         return read_digits(digits)
     return thai_number_to_words(int(digits))
 
@@ -681,8 +702,13 @@ def expand_numbers_for_speech(text: str) -> str:
     text = _SLASH_DATE.sub(_speak_date, text)
 
     def time_range(match: re.Match[str]) -> str:
+        as_range = (
+            f"{_speak_decimal(match.group(1))}ถึง"
+            f"{_speak_decimal(match.group(2))}"
+        )
+        # หน่วยที่ตามหลังพิสูจน์ว่าเป็นช่วงปริมาณ ไม่ใช่ช่วงเวลา
         if _QUANTITY_UNIT.match(text[match.end() :]):
-            return match.group(0)
+            return as_range
         window = text[max(0, match.start() - 24) : match.start()]
         is_time = (
             ":" in match.group(0)
@@ -690,7 +716,9 @@ def expand_numbers_for_speech(text: str) -> str:
             or _TIME_RANGE_CONTEXT.search(window)
         )
         if not is_time:
-            return match.group(0)
+            # ไม่ใช่เวลาก็ยังเป็น "ช่วง" อยู่ดี ปล่อยขีดกลางไว้ TTS จะกลืนหาย
+            # แล้วความหมายของช่วงหายไปทั้งหมด
+            return as_range
         first, second = (re.split(r"[.:]", g) for g in match.groups()[:2])
         return (
             f"{_speak_time(first[0], first[1])}ถึง"

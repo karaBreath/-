@@ -554,9 +554,11 @@ class Testติดอยู่ในโหมดรอยืนยัน:
         session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
         first = session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
         second = session.exchange("แล้วพรุ่งนี้ล่ะ", speaker=speaker, speak=False)
+        third = session.exchange("ขอบคุณมาก", speaker=speaker, speak=False)
 
         assert "ยืนยัน" in first.reply, "ครั้งแรกต้องเตือน"
-        assert "ยืนยัน" not in second.reply, "ครั้งที่สองต้องปล่อยให้โมเดลตอบ"
+        assert "ยกเลิก" in second.reply, "ครั้งที่สองต้องบอกว่าคำขอหมดอายุ"
+        assert "ยกเลิก" not in third.reply, "ครั้งที่สามต้องปล่อยให้โมเดลตอบ"
         assert session._pending_forget == {}
         assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
 
@@ -593,3 +595,21 @@ class Testข้อความขอยืนยันการลบ:
         session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
         answer = session.exchange("ไม่", speaker=speaker, speak=False)
         assert answer.reply.rstrip().endswith(("ค่ะ", "ครับ")), answer.reply
+
+
+class Testคำขอลบที่หมดอายุ:
+    def test_ต้องบอกผู้ใช้ว่าคำขอถูกยกเลิก(self, session, store):
+        """คำสั่งสุดท้ายที่ผู้ใช้ได้ยินคือ "พูดว่า ยืนยัน ได้เลย"
+
+        การทิ้งสถานะรอไปเงียบ ๆ ทำให้เขาพูดตามแล้วไม่มีอะไรเกิดขึ้น
+        """
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+        lapsed = session.exchange("แล้วพรุ่งนี้ล่ะ", speaker=speaker, speak=False)
+
+        assert "ยกเลิก" in lapsed.reply, lapsed.reply
+        assert session._pending_forget == {}
+        assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"

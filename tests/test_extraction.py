@@ -178,3 +178,85 @@ class TestStrictSchema:
             "nickname",
             "gender",
         }
+
+
+class Testความจำที่ถูกลบต้องไม่ฟื้นคืนมา:
+    """งานเบื้องหลังถ่ายภาพบทสนทนาไว้แล้วเรียกโมเดล
+
+    ระหว่างนั้นผู้ใช้อาจสั่งลบความจำและได้ยินว่า "ลบเรียบร้อยแล้ว"
+    พองานกลับมา มันเขียนข้อเท็จจริงที่สกัดจากบทสนทนาที่ถูกลบไปแล้วกลับเข้าไป
+    ระบบจึงบอกผู้ใช้ว่าข้อมูลหายไปทั้งที่ยังอยู่
+    """
+
+    def test_ลบระหว่างสกัดแล้วต้องทิ้งผล(self, store, settings):
+        import threading
+
+        speaker = store.create_speaker("เดช")
+        store.record_turn(speaker.id, "s", "user", "ผมเป็นหมอครับ")
+        turns = store.recent_turns(speaker.id)
+
+        เริ่มแล้ว = threading.Event()
+        ลบเสร็จ = threading.Event()
+
+        class Clientที่ค้าง(FakeAnthropic):
+            def _hold(self):
+                เริ่มแล้ว.set()
+                ลบเสร็จ.wait(timeout=5)
+
+        client = Clientที่ค้าง()
+        client.parsed_outputs = [
+            MemoryUpdate(
+                facts=[
+                    ExtractedFact(
+                        key="อาชีพ", value="หมอ", category="งาน", confidence=0.9
+                    )
+                ],
+                forget_keys=[],
+                display_name="",
+                nickname="",
+                gender="unknown",
+            )
+        ]
+        extractor = MemoryExtractor(store, client, settings)
+        original = extractor._call_model
+
+        def slow(prompt):
+            client._hold()
+            return original(prompt)
+
+        extractor._call_model = slow
+        extractor.schedule(speaker, turns)
+
+        assert เริ่มแล้ว.wait(timeout=5), "งานเบื้องหลังต้องเริ่มแล้ว"
+        removed = store.forget_everything(speaker.id)
+        assert store.facts_for(speaker.id) == []
+        ลบเสร็จ.set()
+        extractor.shutdown(wait=True)
+
+        assert store.facts_for(speaker.id) == [], (
+            f"ข้อเท็จจริงฟื้นคืนมาหลังบอกผู้ใช้ว่าลบแล้ว (ลบไป {removed})"
+        )
+
+    def test_สกัดตามปกติยังเขียนได้(self, store, settings):
+        speaker = store.create_speaker("เดช")
+        store.record_turn(speaker.id, "s", "user", "ผมเป็นหมอครับ")
+        client = FakeAnthropic()
+        client.parsed_outputs = [
+            MemoryUpdate(
+                facts=[
+                    ExtractedFact(
+                        key="อาชีพ", value="หมอ", category="งาน", confidence=0.9
+                    )
+                ],
+                forget_keys=[],
+                display_name="",
+                nickname="",
+                gender="unknown",
+            )
+        ]
+        extractor = MemoryExtractor(store, client, settings)
+
+        extractor.schedule(speaker, store.recent_turns(speaker.id))
+        extractor.shutdown(wait=True)
+
+        assert [(f.key, f.value) for f in store.facts_for(speaker.id)] == [("อาชีพ", "หมอ")]

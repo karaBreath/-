@@ -162,7 +162,10 @@ class MemoryExtractor:
         ให้ข้ามไปเงียบ ๆ ไม่ใช่ทำให้คำขอนั้นกลายเป็น 500
         """
         snapshot = list(turns)
-        self._submit(self._safe_run, speaker, snapshot)
+        # จำรุ่นความจำไว้ตั้งแต่ตอนสั่งงาน ถ้าผู้ใช้สั่งลบระหว่างที่โมเดลกำลัง
+        # ทำงาน ผลที่ได้มาจะเป็นของบทสนทนาที่ถูกลบไปแล้ว ต้องทิ้ง
+        epoch = self.store.memory_epoch(speaker.id)
+        self._submit(self._safe_run, speaker, snapshot, epoch)
 
     def _submit(self, fn, *args) -> None:
         if self._closed:
@@ -178,14 +181,16 @@ class MemoryExtractor:
         return self._extract_and_apply(speaker, list(turns))
 
     # ── ภายใน ───────────────────────────────────────────────────────────
-    def _safe_run(self, speaker: Speaker, turns: list[Turn]) -> None:
+    def _safe_run(
+        self, speaker: Speaker, turns: list[Turn], epoch: int | None = None
+    ) -> None:
         try:
-            self._extract_and_apply(speaker, turns)
+            self._extract_and_apply(speaker, turns, epoch)
         except Exception:  # งานเบื้องหลังต้องไม่ทำให้บทสนทนาล่ม
             log.exception("สกัดความจำไม่สำเร็จ")
 
     def _extract_and_apply(
-        self, speaker: Speaker, turns: list[Turn]
+        self, speaker: Speaker, turns: list[Turn], epoch: int | None = None
     ) -> MemoryUpdate | None:
         if not turns:
             return None
@@ -202,6 +207,16 @@ class MemoryExtractor:
             return None
 
         with self._lock:
+            # ผู้ใช้อาจสั่งลบความจำระหว่างที่โมเดลกำลังทำงาน และได้ยินไปแล้วว่า
+            # "ลบเรียบร้อยแล้ว" การเขียนผลที่สกัดจากบทสนทนาที่ถูกลบไปแล้วกลับเข้าไป
+            # เท่ากับโกหกผู้ใช้ว่าข้อมูลหายไปทั้งที่ยังอยู่
+            if epoch is not None and self.store.memory_epoch(speaker.id) != epoch:
+                log.info(
+                    "ความจำของ speaker %s ถูกล้างระหว่างสกัด — ทิ้งผล", speaker.id
+                )
+                return None
+            if not self.store.speaker_exists(speaker.id):
+                return None
             self._apply(speaker, update, turns)
         return update
 
@@ -277,15 +292,15 @@ class MemoryExtractor:
         """สรุปบทสนทนาสะสมทุก ๆ N เทิร์น (ทำเบื้องหลัง)"""
         total = self.store.turn_count(speaker.id)
         if total and total % max(2, self.settings.summarize_every) == 0:
-            self._submit(self._safe_summarize, speaker)
+            self._submit(self._safe_summarize, speaker, self.store.memory_epoch(speaker.id))
 
-    def _safe_summarize(self, speaker: Speaker) -> None:
+    def _safe_summarize(self, speaker: Speaker, epoch: int | None = None) -> None:
         try:
-            self._summarize(speaker)
+            self._summarize(speaker, epoch)
         except Exception:
             log.exception("สรุปบทสนทนาไม่สำเร็จ")
 
-    def _summarize(self, speaker: Speaker) -> None:
+    def _summarize(self, speaker: Speaker, epoch: int | None = None) -> None:
         previous = self.store.latest_summary(speaker.id)
         after = previous[1] if previous else 0
         turns = self.store.recent_turns(speaker.id, limit=60, after_turn_id=after)
@@ -303,5 +318,13 @@ class MemoryExtractor:
             messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in response.content if b.type == "text"), "").strip()
-        if text:
-            self.store.save_summary(speaker.id, text, turns[-1].id)
+        if not text:
+            return
+        # เช่นเดียวกับการสกัดข้อเท็จจริง — ถ้าความจำถูกล้างระหว่างทาง
+        # บทสรุปนี้เป็นของบทสนทนาที่ถูกลบไปแล้ว
+        if epoch is not None and self.store.memory_epoch(speaker.id) != epoch:
+            log.info("ความจำของ speaker %s ถูกล้างระหว่างสรุป — ทิ้งผล", speaker.id)
+            return
+        if not self.store.speaker_exists(speaker.id):
+            return
+        self.store.save_summary(speaker.id, text, turns[-1].id)

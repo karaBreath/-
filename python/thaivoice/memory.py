@@ -195,6 +195,13 @@ class MemoryStore:
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # นับว่าความจำของแต่ละคนถูกล้างไปกี่ครั้งแล้ว
+        #
+        # งานสกัดความจำเบื้องหลังถ่ายภาพบทสนทนาไว้แล้วเรียกโมเดล ระหว่างนั้น
+        # ผู้ใช้อาจสั่งลบความจำและได้ยินว่า "ลบเรียบร้อยแล้ว" พองานเบื้องหลัง
+        # กลับมา มันจะเขียนข้อเท็จจริงที่สกัดจากบทสนทนา *ที่ถูกลบไปแล้ว*
+        # กลับเข้าไปใหม่ ตัวนับนี้ให้งานที่ค้างอยู่รู้ตัวว่าต้องทิ้งผลของตัวเอง
+        self._memory_epoch: dict[int, int] = {}
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         try:
@@ -471,6 +478,7 @@ class MemoryStore:
         """ลบคนนี้พร้อมความจำทั้งหมด (สิทธิ์ที่จะถูกลืม)"""
         with self._lock:
             cur = self._conn.execute("DELETE FROM speakers WHERE id = ?", (speaker_id,))
+            self._bump_memory_epoch(speaker_id)
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -687,8 +695,18 @@ class MemoryStore:
                     "DELETE FROM turns WHERE speaker_id = ?", (speaker_id,)
                 ).rowcount,
             }
+            self._bump_memory_epoch(speaker_id)
             self._conn.commit()
         return {key: max(0, value) for key, value in removed.items()}
+
+    def memory_epoch(self, speaker_id: int) -> int:
+        """รุ่นความจำปัจจุบันของคนคนนี้ — เพิ่มขึ้นทุกครั้งที่ความจำถูกล้าง"""
+        with self._lock:
+            return self._memory_epoch.get(speaker_id, 0)
+
+    def _bump_memory_epoch(self, speaker_id: int) -> None:
+        """เรียกใต้ lock แล้ว"""
+        self._memory_epoch[speaker_id] = self._memory_epoch.get(speaker_id, 0) + 1
 
     def voiceprint_for(self, speaker_id: int, backend: str) -> list[float] | None:
         """ลายเสียงของคนคนนี้ หรือ ``None`` ถ้ายังไม่มี"""

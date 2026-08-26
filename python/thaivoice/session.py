@@ -550,9 +550,18 @@ class ConversationSession:
             # ถ้าเตือนทุกครั้งที่ตอบไม่ชัด ผู้ใช้ที่เปลี่ยนเรื่องไปแล้วจะคุยเรื่องอื่น
             # ไม่ได้เลย ทุกประโยคจะถูกตอบด้วยข้อความเดิมไปตลอด
             if speaker.id in self._forget_nudged:
+                # คำสั่งสุดท้ายที่ผู้ใช้ได้ยินคือ "พูดว่า ยืนยัน ได้เลย"
+                # การทิ้งสถานะรอไปเงียบ ๆ ทำให้เขาพูดตามแล้วไม่มีอะไรเกิดขึ้น
+                # ต้องบอกให้รู้ว่าคำขอนั้นหมดอายุแล้ว
                 del self._pending_forget[speaker.id]
                 self._forget_nudged.discard(speaker.id)
-                return None
+                return self._say(
+                    f"ขอยกเลิกคำขอลบความจำไปก่อนนะ{_soft(particle)} "
+                    f"ถ้ายังอยากลบ บอกใหม่ได้ตลอด{particle}",
+                    speaker,
+                    speak,
+                    user_text=transcript,
+                )
             self._forget_nudged.add(speaker.id)
             self._pending_forget[speaker.id] = time.time()
             return self._say(

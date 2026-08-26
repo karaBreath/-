@@ -1177,3 +1177,39 @@ class Testเครื่องหมายทับและอัตราส�
 
     def test_รหัสที่มีตัวอักษรละตินนำหน้า(self):
         assert expand_numbers_for_speech("เที่ยวบิน TG 123") == "เที่ยวบิน TG หนึ่ง สอง สาม"
+
+
+class Testรหัสยาวและช่วงที่ไม่ใช่เวลา:
+    @pytest.mark.parametrize(
+        "text", ["ติดต่อ 66812345000", "OTP 12345000", "รหัสอ้างอิง 98765000"]
+    )
+    def test_รหัสที่ลงท้ายด้วยศูนย์ยังเป็นรหัส(self, text):
+        """"ลงท้ายด้วย 000" ไม่พอ — 66812345000 คือเบอร์มือถือที่มีรหัสประเทศนำ"""
+        spoken = expand_numbers_for_speech(text)
+        assert "ล้าน" not in spoken and "หมื่น" not in spoken, spoken
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ประชากร 70000000 คน", "ประชากร เจ็ดสิบล้าน คน"),
+            ("ยอดขาย 12500000 บาท", "ยอดขาย สิบสองล้านห้าแสน บาท"),
+        ],
+    )
+    def test_จำนวนกลมยังอ่านเป็นจำนวน(self, text, expected):
+        assert expand_numbers_for_speech(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "วันที่ 05-10 มิถุนายน",
+            "น้ำหนัก 1.50-2.30 กิโลกรัม",
+            "เกรดเฉลี่ย 3.00-4.00",
+            "ราคา 1.50-2.30 ดอลลาร์",
+        ],
+    )
+    def test_ช่วงที่ไม่ใช่เวลาต้องไม่ทิ้งขีดกลางไว้(self, text):
+        """ขีดกลางอ่านออกเสียงไม่ได้ TTS จะกลืนหาย ความหมายของช่วงหายไปด้วย"""
+        spoken = expand_numbers_for_speech(text)
+        assert "-" not in spoken, spoken
+        assert "ถึง" in spoken, spoken
+        assert "นาฬิกา" not in spoken, spoken
