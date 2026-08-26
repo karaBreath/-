@@ -459,3 +459,52 @@ class TestChunkerNeverHangs:
         chunks.extend(chunker.flush())
         assert time.time() - start < 5.0
         assert chunks
+
+
+class TestChunkerLatency:
+    """เหตุผลทั้งหมดของการสตรีมคือได้ยินเสียงแรกเร็ว ถ้าคำตอบกลายเป็นท่อนเดียว
+    ระบบก็ต้องรอโมเดลพิมพ์จนจบก่อนถึงจะเริ่มพูด ซึ่งเท่ากับไม่ได้สตรีมเลย
+    """
+
+    REPLIES = [
+        "สวัสดีค่ะคุณเดช ยินดีที่ได้คุยกันอีกนะคะ วันนี้งานออกแบบเป็นยังไงบ้างคะ",
+        "ได้เลยค่ะ อย่างแรกคือเรื่องงบประมาณ ถัดมาคือกำหนดส่งงาน สุดท้ายคือทีมที่จะมาช่วย",
+        "ตอนนี้ที่เชียงใหม่อุณหภูมิประมาณ 24 องศาค่ะ อากาศเย็นสบายกำลังดีเลย",
+        "จำได้ค่ะ คุณเดชเป็นสถาปนิกอยู่เชียงใหม่ แล้วก็ชอบกาแฟลาเต้ร้อนใช่ไหมคะ",
+    ]
+
+    @staticmethod
+    def _stream(reply: str, step: int = 5):
+        chunker = SpeechChunker()
+        first_at = None
+        received = 0
+        chunks = []
+        for index in range(0, len(reply), step):
+            piece = reply[index : index + step]
+            received += len(piece)
+            for chunk in chunker.feed(piece):
+                if first_at is None:
+                    first_at = received
+                chunks.append(chunk)
+        chunks.extend(chunker.flush())
+        return first_at, chunks
+
+    @pytest.mark.parametrize("reply", REPLIES)
+    def test_ต้องเริ่มพูดได้ก่อนคำตอบจะจบ(self, reply):
+        first_at, chunks = self._stream(reply)
+        assert first_at is not None, "ไม่มีท่อนไหนถูกปล่อยระหว่างสตรีมเลย"
+        assert first_at < len(reply) * 0.75, (
+            f"ต้องรอถึง {first_at}/{len(reply)} อักขระจึงเริ่มพูดได้ ซึ่งช้าเกินไป"
+        )
+        assert len(chunks) >= 2
+
+    @pytest.mark.parametrize("reply", REPLIES)
+    def test_ข้อความต้องครบไม่หายระหว่างตัด(self, reply):
+        _first, chunks = self._stream(reply)
+        assert "".join(chunks).replace(" ", "") == reply.replace(" ", "")
+
+    def test_ประโยคสั้นที่จบในตัวถูกพูดทันที(self):
+        # "ได้เลยค่ะ" เป็นประโยคสมบูรณ์ พูดออกไปเลยได้ ไม่ต้องรอประโยคถัดไป
+        first_at, chunks = self._stream("ได้เลยค่ะ แล้วเดี๋ยวจะจัดการให้เรียบร้อยนะคะ")
+        assert chunks[0] == "ได้เลยค่ะ"
+        assert first_at <= 12

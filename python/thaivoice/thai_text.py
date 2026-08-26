@@ -550,9 +550,16 @@ class SpeechChunker:
     และเมื่อจำเป็นต้องบังคับตัดเพราะยาวเกินไป จะตัดที่ขอบคำเสมอ
     """
 
-    def __init__(self, min_chars: int = 24, max_chars: int = 160) -> None:
+    def __init__(
+        self, min_chars: int = 24, max_chars: int = 160, phrase_min_chars: int = 8
+    ) -> None:
         self.min_chars = min_chars
         self.max_chars = max_chars
+        # จุดตัดที่ "แน่ใจ" ว่าจบวลีจริง (เครื่องหมายจบประโยคหรือคำลงท้ายสุภาพ)
+        # ใช้เกณฑ์ความยาวต่ำกว่าได้ เพราะคำอย่าง "ได้เลยค่ะ" หรือ "จำได้ค่ะ"
+        # เป็นประโยคสมบูรณ์ในตัวเอง พูดออกไปทันทีได้เลยและฟังเป็นธรรมชาติ
+        # ซึ่งช่วยให้ผู้ฟังได้ยินเสียงแรกเร็วขึ้นมาก
+        self.phrase_min_chars = phrase_min_chars
         self._buf = ""
 
     def feed(self, delta: str) -> Iterator[str]:
@@ -578,26 +585,35 @@ class SpeechChunker:
             yield rest
 
     def _find_cut(self, buf: str) -> int | None:
-        if len(buf) < self.min_chars:
+        if len(buf) < self.phrase_min_chars:
             return None
 
         nl = buf.find("\n")
         if nl >= 0:
-            # ขึ้นบรรทัดใหม่คือจุดตัดที่ชัดที่สุด ใช้ได้แม้ท่อนจะสั้นกว่า min_chars
+            # ขึ้นบรรทัดใหม่คือจุดตัดที่ชัดที่สุด ใช้ได้แม้ท่อนจะสั้น
             return nl + 1
 
         for match in _SENT_END.finditer(buf):
-            if match.end() >= self.min_chars:
+            if match.end() >= self.phrase_min_chars:
                 return match.end()
 
         for match in _PARTICLE_BREAK.finditer(buf):
-            if match.end() >= self.min_chars:
+            if match.end() >= self.phrase_min_chars:
                 return match.end()
 
-        # ภาษาไทยใช้เว้นวรรคแทนการจบวลี — ตัดที่เว้นวรรคเมื่อบัฟเฟอร์ยาวพอแล้ว
+        if len(buf) < self.min_chars:
+            return None
+
+        # ภาษาไทยใช้เว้นวรรคคั่น "วลี" ไม่ใช่คั่นคำ จุดเว้นวรรคจึงเป็นจุดพักเสียง
+        # ที่ฟังแล้วเป็นธรรมชาติ และมักเป็นจุดตัดเดียวที่มีในคำตอบที่ไม่มีคำลงท้าย
+        # กลางประโยค ถ้ารอถึง max_chars อย่างเดิม คำตอบยาว 80 อักขระจะกลายเป็น
+        # ท่อนเดียว แปลว่าต้องรอโมเดลพิมพ์จนจบก่อนถึงจะเริ่มพูด ซึ่งทำลายเหตุผล
+        # ทั้งหมดของการสตรีม
+        space = buf.find(" ", self.min_chars)
+        if space > 0:
+            return space + 1
+
+        # ไม่มีเว้นวรรคเลย — บังคับตัดที่ขอบคำเมื่อยาวเกินไป
         if len(buf) >= self.max_chars:
-            space = buf.rfind(" ", self.min_chars, self.max_chars)
-            if space > 0:
-                return space + 1
             return _word_safe_cut(buf, self.min_chars, self.max_chars)
         return None
