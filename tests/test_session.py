@@ -239,7 +239,7 @@ class TestForgetCommand:
         assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
         assert "ยังไม่ได้ลบ" in after.reply
         assert "ยืนยัน" in after.reply
-        assert session._pending_forget == speaker.id, (
+        assert speaker.id in session._pending_forget, (
             "บอกให้ผู้ใช้พูดว่า 'ยืนยัน' แล้วสถานะรอต้องยังอยู่ "
             "ไม่งั้นผู้ใช้พูดตามแล้วไม่มีอะไรเกิดขึ้น"
         )
@@ -266,12 +266,14 @@ class TestForgetCommand:
         store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
 
         session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
-        session._pending_forget_at = _time.time() - session_mod.FORGET_CONFIRM_TIMEOUT - 1
+        session._pending_forget[speaker.id] = (
+            _time.time() - session_mod.FORGET_CONFIRM_TIMEOUT - 1
+        )
 
         again = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
 
         assert "ขอยืนยันก่อน" in again.reply
-        assert session._pending_forget == speaker.id
+        assert speaker.id in session._pending_forget
         assert store.facts_for(speaker.id), "ยังไม่ยืนยัน ต้องยังไม่ลบ"
 
     def test_คำขอลบของอีกคนระหว่างรอยืนยันต้องไม่ถูกกลืน(self, session, store):
@@ -279,11 +281,20 @@ class TestForgetCommand:
         b = store.create_speaker("มาลี")
         store.upsert_fact(b.id, "อาชีพ", "ครู")
 
+        store.upsert_fact(a.id, "อาชีพ", "หมอ")
+
         session.exchange("ลบความจำทั้งหมด", speaker=a, speak=False)
         reply = session.exchange("ลบความจำของฉัน", speaker=b, speak=False)
 
         assert "ขอยืนยันก่อน" in reply.reply
         assert store.facts_for(b.id), "ยังไม่ยืนยัน ต้องยังไม่ลบ"
+        assert a.id in session._pending_forget, "คำขอของคนแรกต้องไม่ถูกทับ"
+
+        # คนแรกพูดตามที่บอทบอก ต้องได้ผลจริง
+        done = session.exchange("ยืนยัน", speaker=a, speak=False)
+        assert "ลบให้เรียบร้อยแล้ว" in done.reply
+        assert store.facts_for(a.id) == []
+        assert store.facts_for(b.id), "ของคนที่สองต้องไม่ถูกลบไปด้วย"
 
     def test_คำสั่งความจำต้องบันทึกทั้งคำขอและคำตอบ(self, session, store):
         """ของเดิมบันทึกแต่คำตอบ ทำให้บทสนทนามีคำตอบลอย ๆ ไม่มีคำถาม"""
@@ -455,3 +466,43 @@ class Testการเรียกชื่อ:
     @pytest.mark.parametrize("name", ["พี่เดช", "คุณมาลี", "นายสมชาย", "น้องบี"])
     def test_ชื่อที่มีคำเรียกอยู่แล้วต้องไม่ซ้อน(self, name):
         assert _address(name) == name
+
+
+class Testสำนวนถามชื่อที่ไม่มีช่องว่างนำหน้า:
+    """ภาษาไทยไม่เว้นวรรคระหว่างคำ ขอบซ้ายแบบห้ามมีตัวอักษรนำหน้าจึงแน่นเกินไป
+
+    "แล้วเรียกว่าอะไรดีครับ" "รบกวนขอชื่อหน่อยครับ" หลุดหมด พอหลุดแล้วผู้ใช้
+    จะไม่ถูกสร้างตัวตนเลย ไม่มีความจำ ไม่มีลายเสียง และบอทจะถามชื่อซ้ำทุกเทิร์น
+    """
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "แล้วเรียกว่าอะไรดีครับ",
+            "รบกวนขอชื่อหน่อยครับ",
+            "ช่วยแนะนำตัวหน่อยสิครับ",
+            "ยังไม่ได้ถามเลยว่าเรียกว่าอะไรดีครับ",
+            "ผมขอทราบชื่อหน่อยครับ",
+            "เดี๋ยวขอชื่อหน่อยนะครับ",
+        ],
+    )
+    def test_ต้องเปิดประตู(self, session, reply):
+        session._note_assistant_reply(reply)
+        assert session._asked_for_name is True
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "ร้านนั้นเรียกว่าอะไรคะ",
+            "ขอแนะนำตัวช่วยสักหน่อยครับ",
+            "ลูกคุณชื่ออะไรคะ",
+        ],
+    )
+    def test_คำนามที่เป็นเจ้าของชื่อยังถูกกันอยู่(self, session, reply):
+        session._note_assistant_reply(reply)
+        assert session._asked_for_name is False
+
+    def test_ครบวงจร_บอทถามแล้วผู้ใช้ตอบต้องได้ตัวตน(self, session, store):
+        session._note_assistant_reply("แล้วเรียกว่าอะไรดีครับ")
+        session.exchange("เดชครับ", speak=False)
+        assert [s.display_name for s in store.list_speakers()] == ["เดช"]

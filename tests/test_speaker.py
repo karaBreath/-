@@ -377,3 +377,43 @@ class Testเพศที่ยังไม่รู้:
     def test_สรรพนามบอกเพศได้พอๆกับคำลงท้าย(self, store, utterance, gender):
         ระบบ = SpeakerIdentifier(store, None)
         assert ระบบ.resolve(None, 16000, utterance).speaker.gender == gender
+
+
+class Testคำนำที่กำกวม:
+    """ผ่อนให้ยาวกว่าคำนำได้สามตัวอักษรหลวมเกินไปมาก
+
+    "ชื่อลูกค้า" "ชื่อเพลงนี้" "ชื่อร้านชัย" "ชื่อหมาผม" กลายเป็นชื่อคนหมด
+    แล้วลายเสียงของผู้ใช้จะถูกผูกกับตัวตนปลอมนั้นถาวร
+    """
+
+    @pytest.mark.parametrize(
+        "utterance",
+        ["ชื่อลูกค้า", "ชื่อเพลงนี้", "ชื่อร้านชัย", "ชื่อหมาผม", "ชื่อเมนูนี้", "ชื่อเพื่อนผม"],
+    )
+    def test_ต้องไม่กลายเป็นชื่อคน(self, utterance):
+        assert extract_name_claim(utterance) is None
+
+    @pytest.mark.parametrize(
+        "utterance,name",
+        [
+            ("ผมชื่อแมวครับ", "แมว"),
+            ("หนูชื่อเพลงค่ะ", "เพลง"),
+            ("ผมชื่อลูกน้ำครับ", "ลูกน้ำ"),
+            ("ผมชื่อปลาครับ", "ปลา"),
+        ],
+    )
+    def test_ชื่อเล่นที่เป็นคำธรรมดายังใช้ได้(self, utterance, name):
+        assert extract_name_claim(utterance) == name
+
+
+class Testคำตอบที่เป็นประโยคไม่ใช่ชื่อ:
+    @pytest.mark.parametrize(
+        "answer",
+        ["อยู่บ้าน", "ขับรถอยู่", "เพิ่งตื่น", "นั่งเล่น", "สบายดี", "ก็ดีนะ", "แป๊บนึง"],
+    )
+    def test_ต้องถูกปฏิเสธ(self, answer):
+        assert extract_name_claim(answer, expecting_name=True) is None
+
+    @pytest.mark.parametrize("answer", ["O'Brien", "Anne-Marie", "มิ้น"])
+    def test_ชื่อที่มีเครื่องหมายในตัวยังผ่าน(self, answer):
+        assert extract_name_claim(answer, expecting_name=True) == answer

@@ -393,6 +393,12 @@ _TIME_CONTEXT = re.compile(
 # ต้องจับก่อน ไม่งั้นแต่ละกลุ่มจะถูกอ่านเป็นจำนวน ("หนึ่ง-สองร้อยสามสิบสี่-ห้าพัน...")
 _MAYBE_PHONE = re.compile(r"(?<![\w])(\+?\d[\d\- ]{7,17}\d)(?![\w])")
 
+# คำนำหน้าที่บอกว่าตัวเลขข้างหลังเป็นรหัสประจำตัว ไม่ใช่จำนวน
+_ID_CONTEXT = re.compile(
+    r"(?:เลขบัตร|บัตรประชาชน|บัตรเครดิต|เลขบัญชี|เลขที่บัญชี|บัญชีเลขที่|"
+    r"เลขประจำตัว|เลขพัสดุ|เลขที่พัสดุ|หมายเลข|เลขทะเบียน|passport|พาสปอร์ต)"
+)
+
 # วันที่แบบ 15/8/2568 — เครื่องหมายทับอ่านออกเสียงไม่ได้
 _SLASH_DATE = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})/(\d{4})(?![\w/])")
 
@@ -405,7 +411,9 @@ _THAI_MONTHS = (
 # ทำให้ "3-5 คน" ฟังเป็น "สามห้าคน" ซึ่งความหมายเปลี่ยน
 # ต้องรับรูปที่มีจุลภาคด้วย ("1,200-1,500 บาท") ไม่งั้นจะเหลือขีดกลางค้างอยู่
 # ระหว่างคำอ่านสองก้อน ซึ่ง TTS กลืนหายไปเฉย ๆ
-_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|\d{1,4})"
+# ต้องรับถึงหกหลัก ไม่งั้น "ราคา 10000-20000 บาท" ตกไปให้กฎเบอร์โทรจัดการ
+# ซึ่งเห็นขีดกลางของช่วงเป็นหลักฐานว่าเป็นเบอร์ แล้วอ่านทีละตัวยาวเหยียด
+_RANGE_TOKEN = r"(?:\d{1,3}(?:,\d{3})+|\d{1,6})"
 _NUMBER_RANGE = re.compile(
     rf"(?<![\w.,-])({_RANGE_TOKEN})\s*-\s*({_RANGE_TOKEN})(?![\d\w,-])"
 )
@@ -484,16 +492,20 @@ def _speak_time(hour: str, minute: str) -> str:
     return spoken
 
 
-def _speak_phone(match: re.Match[str]) -> str:
+def _speak_phone(match: re.Match[str], id_context: bool = False) -> str:
     """อ่านเบอร์โทรทีละตัว ถ้าดูแล้วเป็นเบอร์โทรจริง ไม่งั้นปล่อยไว้"""
     raw = match.group(1)
     digits = re.sub(r"\D", "", raw)
     # เบอร์โทร เลขบัญชี เลขบัตร และเลขประจำตัว ล้วนยาวและอ่านทีละตัวทั้งหมด
     # ไม่ต้องแยกประเภท แค่ยาวพอและมีตัวคั่นก็พอ
-    long_enough = 9 <= len(digits) <= 20
+    long_enough = 9 <= len(digits) <= 24
     # ต้องมีร่องรอยว่าเป็นเบอร์จริง ไม่งั้น "ราคา 1500 2000 3000 บาท" หรือ
     # "ปี 2566 2567 2568" จะถูกเหมารวมเป็นเบอร์เดียวแล้วอ่านทีละตัวยาวเหยียด
-    looks_like_phone = "-" in raw or raw[0] in "+0"
+    #
+    # ``id_context`` คือคำนำหน้าอย่าง "เลขบัตรประชาชน" ซึ่งเป็นหลักฐานเพียงพอ
+    # ในตัวเอง — เลขบัตรประชาชนไทยเขียนเป็น "1 2345 67890 12 3" คั่นด้วยช่องว่าง
+    # และไม่ได้ขึ้นต้นด้วย 0 กฎ "ต้องมีขีดหรือขึ้นต้นด้วย 0" จึงพลาดเสมอ
+    looks_like_phone = "-" in raw or raw[0] in "+0" or id_context
     return read_digits(digits) if long_enough and looks_like_phone else raw
 
 
@@ -553,10 +565,6 @@ def expand_numbers_for_speech(text: str) -> str:
         return match.group(0)
 
     text = _TIME_DOT_BARE.sub(bare_time, text)
-    text = _MAYBE_PHONE.sub(_speak_phone, text)
-    text = _CODE_NUMBER.sub(
-        lambda m: f"{m.group(1)}{m.group(2)} {read_digits(m.group(3))}", text
-    )
 
     def range_or_score(match: re.Match[str]) -> str:
         window = text[max(0, match.start() - 20) : match.start()]
@@ -565,6 +573,18 @@ def expand_numbers_for_speech(text: str) -> str:
             f"{_speak_quantity(match.group(1))}{joiner}"
             f"{_speak_quantity(match.group(2))}"
         )
+
+    def phone(match: re.Match[str]) -> str:
+        window = text[max(0, match.start() - 28) : match.start()]
+        return _speak_phone(match, id_context=bool(_ID_CONTEXT.search(window)))
+
+    # ช่วงตัวเลขต้องมาก่อนกฎเบอร์โทร ไม่งั้น "10000-20000" จะถูกมองว่าเป็นเบอร์
+    # เพราะมีขีดกลางอยู่ แล้วอ่านทีละตัวยาวเหยียด
+    text = _NUMBER_RANGE.sub(range_or_score, text)
+    text = _MAYBE_PHONE.sub(phone, text)
+    text = _CODE_NUMBER.sub(
+        lambda m: f"{m.group(1)}{m.group(2)} {read_digits(m.group(3))}", text
+    )
 
     def slash_pair(match: re.Match[str]) -> str:
         window = text[max(0, match.start() - 24) : match.start()]
@@ -591,7 +611,6 @@ def expand_numbers_for_speech(text: str) -> str:
             spoken += f" จุด {read_digits(match.group(2))}"
         return spoken
 
-    text = _NUMBER_RANGE.sub(range_or_score, text)
     text = _GROUPED_NUMBER.sub(grouped, text)
 
     def replace(match: re.Match[str]) -> str:
@@ -622,8 +641,10 @@ def expand_numbers_for_speech(text: str) -> str:
 # ("ผศ. ดร. สมชาย" -> "ผศ. ดร." + "สมชาย") ทำให้ TTS หยุดผิดที่และเสียงขาด
 # จึงต้องไม่ตัดเมื่อจุดนั้นตามหลังตัวย่อที่รู้จัก
 _THAI_ABBREVIATIONS = (
+    # "พล" ต้องอยู่ด้วย ไม่ใช่แค่ "พล.อ" — รายการที่มีจุดอยู่ในตัวกันได้แค่จุด
+    # *ที่สอง* จุดแรกของ "พล.อ. ประยุทธ์" จึงยังตัดกลางยศอยู่
     "ผศ", "รศ", "ดร", "นพ", "พญ", "ทพ", "บมจ", "บจก", "หจก", "ปตท",
-    "กฟผ", "รร", "รพ", "ร.ต", "ร.ท", "ร.อ",
+    "กฟผ", "รร", "รพ", "พล", "ร.ต", "ร.ท", "ร.อ", "พล.ต.อ", "พล.ต.ท",
     "พ.ต", "พ.ท", "พ.อ", "พล.ต", "พล.ท", "พล.อ", "น.ส", "ด.ช", "ด.ญ",
 )
 _SENT_END = re.compile(r"(?:(?<=[^\W\d_]{2})\.|[!?…‽])+[\s\"'”’)\]]*")

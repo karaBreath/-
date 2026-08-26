@@ -429,8 +429,15 @@ class MemoryStore:
                 sets.append(f"{key} = ?")
                 values.append(value)
                 if key == "display_name":
+                    # ต้องกันชื่อว่างเหมือน create_speaker ไม่งั้นได้แถวที่
+                    # name_key ว่าง ซึ่ง partial index ไม่คุม หาไม่เจอด้วยชื่อ
+                    # อีกเลย และบอทจะเรียกเขาว่า "คุณ" เฉย ๆ
+                    clean = " ".join(str(value or "").split())
+                    if not clean:
+                        raise ValueError("ชื่อผู้สนทนาว่างเปล่า")
+                    values[-1] = clean
                     sets.append("name_key = ?")
-                    rename_to = normalize_name(str(value))
+                    rename_to = normalize_name(clean)
                     values.append(rename_to)
         if not sets:
             return self.get_speaker(speaker_id)

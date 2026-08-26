@@ -32,6 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .brain import ThaiBrain
@@ -335,11 +337,26 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
             "<code>cd typescript &amp;&amp; npm install &amp;&amp; npm run build</code></p>"
         )
 
+    @app.middleware("http")
+    async def refuse_when_closing(request: "Request", call_next):  # type: ignore[no-untyped-def]
+        """ระหว่างปิดตัว ทุก endpoint ต้องตอบ 503 ไม่ใช่ระเบิดเป็น 500
+
+        ของเดิมเช็คแค่ที่ /health คำขออื่นจึงวิ่งเข้าไปเจอฐานข้อมูลที่ปิดแล้ว
+        (/api/speakers ระเบิดพร้อม traceback) หรือแย่กว่านั้นคือตอบ 200
+        อย่างร่าเริงโดยไม่ได้บันทึกอะไรเลย (/api/chat)
+        """
+        if runtime.closed and request.url.path != "/health":
+            return JSONResponse(
+                {"detail": "เซิร์ฟเวอร์กำลังปิดตัว ลองใหม่อีกครั้ง"}, status_code=503
+            )
+        return await call_next(request)
+
     @app.get("/health")
-    def health() -> dict:
+    def health(response: "Response") -> dict:
         if runtime.closed:
-            # ระหว่างปิดตัว ต้องตอบว่าไม่พร้อม ไม่ใช่ระเบิดเป็น 500
-            # เพราะ load balancer ใช้ endpoint นี้ตัดสินว่าจะส่งคำขอมาต่อไหม
+            # load balancer อ่าน status code ไม่ใช่เนื้อความ ตอบ 200 ต่อไป
+            # เท่ากับบอกให้ส่งคำขอมาเรื่อย ๆ ทั้งที่รับไม่ได้แล้ว
+            response.status_code = 503
             return {"ok": False, "closing": True, "model": settings.model}
         return {
             "ok": True,

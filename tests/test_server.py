@@ -583,10 +583,34 @@ class Testการปิดเซิร์ฟเวอร์:
         app = create_app(settings, runtime=runtime)
         with TestClient(app) as client:
             runtime.close()
-            body = client.get("/health").json()
+            response = client.get("/health")
 
-        assert body["ok"] is False
-        assert body["closing"] is True
+        # load balancer อ่าน status code ไม่ใช่เนื้อความ ตอบ 200 ต่อไปเท่ากับ
+        # บอกให้ส่งคำขอมาเรื่อย ๆ ทั้งที่รับไม่ได้แล้ว
+        assert response.status_code == 503
+        assert response.json()["ok"] is False
+        assert response.json()["closing"] is True
+
+    @pytest.mark.parametrize("path", ["/api/speakers", "/api/chat"])
+    def test_ปิดแล้ว_endpoint_อื่นต้องตอบ_503_ไม่ใช่ระเบิดหรือโกหก(
+        self, settings, fake_client, path
+    ):
+        """ของเดิมเช็คแค่ที่ /health
+
+        /api/speakers จึงระเบิดพร้อม traceback ส่วน /api/chat ตอบ 200
+        อย่างร่าเริงโดยไม่ได้บันทึกอะไรเลย
+        """
+        runtime = ServerRuntime(settings, client=fake_client)
+        app = create_app(settings, runtime=runtime)
+        with TestClient(app) as client:
+            runtime.close()
+            response = (
+                client.get(path)
+                if path == "/api/speakers"
+                else client.post(path, json={"text": "สวัสดี"})
+            )
+
+        assert response.status_code == 503
 
     def test_ปิดซ้ำต้องไม่พัง(self, settings, fake_client):
         runtime = ServerRuntime(settings, client=fake_client)

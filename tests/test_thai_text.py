@@ -851,3 +851,45 @@ class Testเวลาและเศษส่วน:
         """ของเดิมจำกัดที่ 12 หลัก เลข 13 หลักจึงหลุดไปให้ TTS อ่านดิบ ๆ"""
         spoken = expand_numbers_for_speech("เลขบัตรประชาชน 1234567890123")
         assert not any(ch.isdigit() for ch in spoken), spoken
+
+
+class Testรหัสประจำตัวและช่วงราคา:
+    def test_เลขประจำตัวที่คั่นด้วยช่องว่างต้องอ่านทีละตัว(self):
+        """เลขบัตรประชาชนไทยเขียนเป็น "1 2345 67890 12 3" และไม่ขึ้นต้นด้วย 0
+
+        กฎ "ต้องมีขีดหรือขึ้นต้นด้วย 0" ที่เพิ่มรอบสามจึงพลาดเสมอ
+        """
+        for text in (
+            "บัตรประชาชน 1 2345 67890 12 3",
+            "เลขบัตร 4111 1111 1111 1111",
+            "เลขบัญชี 123 456 7890",
+        ):
+            spoken = expand_numbers_for_speech(text)
+            assert not any(ch.isdigit() for ch in spoken), spoken
+
+    def test_รายการตัวเลขธรรมดายังไม่ถูกเหมาเป็นเบอร์(self):
+        assert "สองพันห้าร้อยหกสิบหก" in expand_numbers_for_speech("ปี 2566 2567 2568")
+        assert "หนึ่งพันห้าร้อย" in expand_numbers_for_speech("ราคา 1500 2000 3000 บาท")
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # ห้าหลักเคยตกไปให้กฎเบอร์โทร ซึ่งเห็นขีดกลางของช่วงเป็นหลักฐาน
+            ("ราคา 10000-20000 บาท", "ราคา หนึ่งหมื่นถึงสองหมื่น บาท"),
+            (
+                "เงินเดือน 15000-25000 บาท",
+                "เงินเดือน หนึ่งหมื่นห้าพันถึงสองหมื่นห้าพัน บาท",
+            ),
+        ],
+    )
+    def test_ช่วงราคาห้าหลัก(self, text, expected):
+        assert expand_numbers_for_speech(text) == expected
+
+    def test_ยศทหารต้องไม่ถูกตัดกลาง(self):
+        """รายการที่มีจุดอยู่ในตัวกันได้แค่จุดที่สอง จุดแรกของ "พล.อ." จึงหลุด"""
+        chunker = SpeechChunker(min_chars=8)
+        out = []
+        for ch in "ครับผม พล.อ. ประยุทธ์ เดินทางไปประชุมครับ":
+            out += list(chunker.feed(ch))
+        out += list(chunker.flush())
+        assert out[0] == "ครับผม พล.อ."

@@ -90,11 +90,30 @@ _FIRST_PERSON_FORGOT = re.compile(_SELF + r"\s*(?:ก็|เลย)?\s*ลืม
 # กติกาที่ใช้ตอนนี้
 #   * ขอบซ้าย: ห้ามมีตัวอักษรไทย/ละตินนำหน้า (กัน "หมาคุณชื่ออะไร")
 #   * ขอบขวา: ต้องตามด้วยคำขอ/คำลงท้าย/จบประโยค (กัน "ขอชื่อร้าน")
-_NAME_Q_LEFT = r"(?<![ก-๛A-Za-z])"
+#
+# ขอบซ้ายแบบ "ห้ามมีตัวอักษรไทยนำหน้า" เพียงอย่างเดียวแน่นเกินไป — ภาษาไทย
+# ไม่เว้นวรรคระหว่างคำ กฎจึงยิงใส่ประโยคปกติแทบทุกประโยค
+# "แล้วเรียกว่าอะไรดีครับ" "รบกวนขอชื่อหน่อยครับ" "ช่วยแนะนำตัวหน่อยสิครับ"
+# หลุดหมด พอหลุดแล้วผู้ใช้จะไม่ถูกสร้างตัวตนเลย ไม่มีความจำ ไม่มีลายเสียง
+# และบอทจะถามชื่อซ้ำไปเรื่อย ๆ ทุกเทิร์น
+#
+# จึงยอมให้มีคำเชื่อม/คำขอร้องนำหน้าได้ตามรายการนี้ ซึ่งไม่มีคำไหนเป็นคำนาม
+# ที่ "เป็นเจ้าของชื่อ" ได้เลย ("หมา" "เพลง" "ลูก" "บริษัท" จึงยังถูกกันอยู่)
+_NAME_Q_PREFIXES = (
+    "แล้ว", "รบกวน", "ช่วย", "ขอ", "ว่า", "ก็", "จะ", "งั้น", "ทีนี้",
+    "เดี๋ยว", "แต่", "และ", "ผม", "ดิฉัน", "ฉัน", "หนู", "เรา", "อ้อ", "เอ",
+)
+_NAME_Q_LEFT = (
+    "(?:(?<![ก-๛A-Za-z])"
+    + "".join(f"|(?<={prefix})" for prefix in _NAME_Q_PREFIXES)
+    + ")"
+)
 # ขอบขวาต้องครอบ *ทุก* ทางเลือก ไม่ใช่ทางเลือกสุดท้ายทางเดียว
 # (เคยเขียนต่อท้ายก้อน alternation ซึ่ง Python ผูกให้กับทางเลือกสุดท้ายเท่านั้น
 # "ผมยังไม่ทราบชื่อร้านนั้นครับ" จึงยังติดอยู่)
-_NAME_Q_END = r"(?=[\s\?\.!,]|ครับ|ค่ะ|คะ|นะ|ได้ไหม|ได้มั้ย|หรือ|เลย|$)"
+_NAME_Q_END = (
+    r"(?=[\s\?\.!,]|ครับ|ค่ะ|คะ|นะ|ได้ไหม|ได้มั้ย|หรือ|เลย|สิ|ที|ด้วย|$)"
+)
 _NAME_Q_ALTERNATIVES = (
     # ระบุสรรพนามชัดเจน — ปลอดภัยพอโดยไม่ต้องยึดขอบซ้าย
     r"เรียก(?:คุณ|ผม|ฉัน|หนู|เธอ)ว่าอะไร(?:ดี)?",
@@ -262,8 +281,12 @@ class ConversationSession:
         self.sticky_speaker = sticky_speaker
         self.current_speaker: Speaker | None = None
         # id ของคนที่ขอลบความจำและกำลังรอการยืนยัน พร้อมเวลาที่ขอ
-        self._pending_forget: int | None = None
-        self._pending_forget_at: float = 0.0
+        # คำขอลบที่รอยืนยันอยู่ — ต้องเก็บ *ต่อคน* ไม่ใช่ช่องเดียว
+        #
+        # หนึ่ง session รับได้หลายคน (คุยกันหลายคนหน้าไมค์ตัวเดียว) ของเดิมใช้
+        # ช่องเดียว คำขอของคนที่สองจึงทับของคนแรกทิ้งเงียบ ๆ คนแรกที่ถูกบอกให้
+        # พูดว่า "ยืนยัน" พูดตามแล้วไม่มีอะไรเกิดขึ้น โมเดลตอบเองว่าจัดการให้แล้ว
+        self._pending_forget: dict[int, float] = {}
         # เทิร์นก่อนหน้าบอทถามชื่อไปหรือเปล่า
         self._asked_for_name = False
 
@@ -311,8 +334,8 @@ class ConversationSession:
             return None
         if not self.store.speaker_exists(self.current_speaker.id):
             log.info("ผู้สนทนา %s ถูกลบไปแล้ว ล้างสถานะ", self.current_speaker.id)
+            self._pending_forget.pop(self.current_speaker.id, None)
             self.current_speaker = None
-            self._pending_forget = None
         return self.current_speaker
 
     def register_speaker(
@@ -429,24 +452,19 @@ class ConversationSession:
         """จัดการคำสั่งลบความจำ คืน ``None`` ถ้าไม่ใช่คำสั่งประเภทนี้"""
         particle = self.settings.assistant_particle
 
-        # กำลังรอยืนยันอยู่
-        if self._pending_forget is not None:
-            pending_id = self._pending_forget
-            expired = time.time() - self._pending_forget_at > FORGET_CONFIRM_TIMEOUT
-            same_person = speaker is not None and speaker.id == pending_id
-            # หมดเวลา หรือคนอื่นพูดแทรกขึ้นมา — ทั้งสองกรณีต้อง *ไม่* return ทิ้ง
-            # ไปเฉย ๆ เพราะประโยคที่กำลังพิจารณาอยู่นี้อาจเป็นคำขอลบอันใหม่
-            # ของบ๊อกคนที่พูด ของเดิมกลืนมันหายไปให้โมเดลตอบว่า "ลบให้แล้ว"
-            # ทั้งที่ไม่ได้ลบอะไรเลย
-            if expired:
-                self._pending_forget = None
-                return self._new_forget_request(transcript, speaker, speak)
-            if not same_person:
-                # ไม่ยกเลิกคำขอของเจ้าตัวที่ยังค้างอยู่ แต่ก็ต้องรับคำขอของคนนี้
-                return self._new_forget_request(transcript, speaker, speak)
+        # เก็บกวาดคำขอที่หมดเวลาไปแล้วของทุกคน
+        now = time.time()
+        self._pending_forget = {
+            person: asked
+            for person, asked in self._pending_forget.items()
+            if now - asked <= FORGET_CONFIRM_TIMEOUT
+        }
+
+        # คนที่กำลังพูดมีคำขอค้างอยู่ไหม — คำขอของคนอื่นต้องไม่ถูกแตะ
+        if speaker is not None and speaker.id in self._pending_forget:
             answer = is_affirmative(transcript)
             if answer is True:
-                self._pending_forget = None
+                del self._pending_forget[speaker.id]
                 removed = self.store.forget_everything(speaker.id)
                 log.info("ลบความจำของ speaker %s: %s", speaker.id, removed)
                 return self._say(
@@ -460,7 +478,7 @@ class ConversationSession:
                     user_text=transcript,
                 )
             if answer is False:
-                self._pending_forget = None
+                del self._pending_forget[speaker.id]
                 return self._say(
                     f"ได้{particle} งั้นไม่ลบนะ{_soft(particle)} ความจำทั้งหมดยังอยู่ครบ",
                     speaker,
@@ -473,7 +491,7 @@ class ConversationSession:
             # "จัดการให้แล้วครับ" ทั้งที่ข้อมูลยังอยู่ครบ — คำสั่งลบที่ผู้ใช้
             # เชื่อว่าทำไปแล้วแต่ไม่ได้ทำ เป็นบั๊กที่ยอมไม่ได้
             # จึงคงสถานะรอไว้และรีเซ็ตนาฬิกาให้ตอบทันเสมอ
-            self._pending_forget_at = time.time()
+            self._pending_forget[speaker.id] = time.time()
             return self._say(
                 f'ยังไม่ได้ลบอะไรนะ{_soft(particle)} ถ้าจะลบจริง ๆ พูดว่า "ยืนยัน" '
                 f"ได้เลย{particle}",
@@ -501,8 +519,7 @@ class ConversationSession:
                 user_text=transcript,
             )
 
-        self._pending_forget = speaker.id
-        self._pending_forget_at = time.time()
+        self._pending_forget[speaker.id] = time.time()
         stats = self.store.stats(speaker.id)
         return self._say(
             f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}ทั้งหมด "

@@ -261,3 +261,24 @@ class Testกุญแจของคนชื่อซ้ำต้องพิ�
         assert updated.display_name == "สมชาย"
         assert store.get_speaker(a.id) is not None
         assert {s.id for s in store.find_speakers_by_name("สมชาย")} == {a.id, b.id}
+
+
+class Testชื่อว่างตอนเปลี่ยนชื่อ:
+    """create_speaker กันไว้แล้ว แต่ update_speaker ไม่กัน
+
+    ผลคือได้แถวที่ name_key ว่าง ซึ่ง partial index ไม่คุม หาไม่เจอด้วยชื่อ
+    อีกเลย และบอทจะเรียกเขาว่า "คุณ" เฉย ๆ
+    """
+
+    @pytest.mark.parametrize("bad", ["", "   ", None])
+    def test_ต้องปฏิเสธชื่อว่าง(self, store, bad):
+        speaker = store.create_speaker("เดช")
+        with pytest.raises(ValueError):
+            store.update_speaker(speaker.id, display_name=bad)
+        assert store.find_speaker_by_name("เดช") is not None
+
+    def test_เปลี่ยนชื่อปกติยังทำได้(self, store):
+        speaker = store.create_speaker("เดช")
+        updated = store.update_speaker(speaker.id, display_name="  สมชาย  ")
+        assert updated is not None and updated.display_name == "สมชาย"
+        assert store.find_speaker_by_name("สมชาย").id == speaker.id
