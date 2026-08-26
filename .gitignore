@@ -27,3 +27,6 @@ audio_cache/
 
 # ผลลัพธ์จากการ build ฝั่งเว็บ (สร้างด้วย npm run build)
 typescript/web/js/
+
+# virtualenv ทุกแบบ (.venv, .venv-full, ฯลฯ)
+.venv*/
