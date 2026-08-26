@@ -234,6 +234,60 @@ class TestForgetCommand:
         assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
         assert "ยังไม่ได้ลบ" in after.reply
         assert "ยืนยัน" in after.reply
+        assert session._pending_forget == speaker.id, (
+            "บอกให้ผู้ใช้พูดว่า 'ยืนยัน' แล้วสถานะรอต้องยังอยู่ "
+            "ไม่งั้นผู้ใช้พูดตามแล้วไม่มีอะไรเกิดขึ้น"
+        )
+
+    def test_พูดยืนยันหลังตอบเรื่องอื่นแล้วต้องลบจริง(self, session, store):
+        """คำสั่งที่บอทบอกให้พูดต้องใช้งานได้จริง ไม่งั้นโมเดลจะตอบว่าลบแล้วเอง"""
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+        done = session.exchange("ยืนยัน", speaker=speaker, speak=False)
+
+        assert "ลบให้เรียบร้อยแล้ว" in done.reply
+        assert store.facts_for(speaker.id) == []
+
+    def test_ขอลบใหม่หลังคำขอเก่าหมดอายุต้องไม่ถูกกลืน(self, session, store):
+        """ของเดิม return None ทิ้งไปให้โมเดลตอบ ซึ่งมันตอบว่า 'จัดการให้แล้ว'"""
+        import time as _time
+
+        from thaivoice import session as session_mod
+
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session._pending_forget_at = _time.time() - session_mod.FORGET_CONFIRM_TIMEOUT - 1
+
+        again = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+
+        assert "ขอยืนยันก่อน" in again.reply
+        assert session._pending_forget == speaker.id
+        assert store.facts_for(speaker.id), "ยังไม่ยืนยัน ต้องยังไม่ลบ"
+
+    def test_คำขอลบของอีกคนระหว่างรอยืนยันต้องไม่ถูกกลืน(self, session, store):
+        a = session.register_speaker("เดช")
+        b = store.create_speaker("มาลี")
+        store.upsert_fact(b.id, "อาชีพ", "ครู")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=a, speak=False)
+        reply = session.exchange("ลบความจำของฉัน", speaker=b, speak=False)
+
+        assert "ขอยืนยันก่อน" in reply.reply
+        assert store.facts_for(b.id), "ยังไม่ยืนยัน ต้องยังไม่ลบ"
+
+    def test_คำสั่งความจำต้องบันทึกทั้งคำขอและคำตอบ(self, session, store):
+        """ของเดิมบันทึกแต่คำตอบ ทำให้บทสนทนามีคำตอบลอย ๆ ไม่มีคำถาม"""
+        speaker = session.register_speaker("เดช")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+
+        roles = [t.role for t in store.recent_turns(speaker.id, limit=10)]
+        assert roles[-2:] == ["user", "assistant"]
 
     def test_คำลงท้ายเดี่ยวไม่นับเป็นการยินยอมให้ลบ(self, session, store):
         """"ครับ"/"ค่ะ" เป็นคำรับคำทั่วไป และระบบถอดเสียงก็แถมมาเองบ่อย
@@ -334,3 +388,45 @@ class TestRegistration:
         result = session.exchange("ยังอยู่ไหม", speak=False)
         assert result.speaker is None
         assert result.reply
+
+
+class Testบอทถามชื่อจริงหรือเปล่า:
+    """``_asked_for_name`` เปิดประตูให้คำตอบถัดไปกลายเป็น *ชื่อของผู้ใช้*
+
+    ถ้าจับกว้างไป ประโยคธรรมดาอย่าง "ขอชื่อร้านหน่อยครับ" จะทำให้คำตอบ
+    "ครัวคุณต๋อย" กลายเป็นชื่อผู้ใช้ ตัวตนถูกสลับ ความจำเดิมกำพร้า
+    และลายเสียงถูกผูกกับตัวตนปลอม
+    """
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "ขอแนะนำตัวเลือกที่ดีที่สุดสามอย่างนะคะ",
+            "ขอแนะนำตัวแทนจำหน่ายใกล้บ้านคุณนะคะ",
+            "ขอแนะนำตัวเองก่อนนะคะ",
+            "ขอชื่อร้านที่คุณไปมาหน่อยได้ไหมคะ",
+            "ขอชื่อไฟล์ที่ error หน่อยครับ",
+            "ขอทราบชื่อยาที่คุณกินอยู่หน่อยค่ะ",
+            "หมาคุณชื่ออะไรคะ",
+            "แล้วเพลงนั้นเรียกว่าอะไรคะ",
+        ],
+    )
+    def test_ประโยคที่ไม่ได้ถามชื่อผู้ใช้ต้องไม่เปิดประตู(self, session, reply):
+        session._note_assistant_reply(reply)
+        assert session._asked_for_name is False
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "ยังไม่ได้ถามเลย เรียกว่าอะไรดีคะ",
+            "ขอชื่อหน่อยได้ไหมครับ",
+            "ขอทราบชื่อคุณหน่อยค่ะ",
+            "คุณชื่ออะไรคะ",
+            "ยังไม่ทราบชื่อเลยค่ะ",
+            "แนะนำตัวหน่อยครับ",
+            "เรียกคุณว่าอะไรดีคะ",
+        ],
+    )
+    def test_ประโยคที่ถามชื่อผู้ใช้ต้องเปิดประตู(self, session, reply):
+        session._note_assistant_reply(reply)
+        assert session._asked_for_name is True

@@ -178,3 +178,54 @@ class TestResolve:
         assert identifier.enabled is False
         assert identifier.backend_name == "none"
         assert identifier.identify(b"x" * 100, 16000).speaker is None
+
+
+class Testชื่อเล่นสองตัวอักษร:
+    """โอ มด นก ปอ เอ บี เจ กบ เป็นชื่อเล่นไทยที่พบบ่อยที่สุดกลุ่มหนึ่ง
+
+    ของเดิมกัน "นะ" ด้วยความยาวขั้นต่ำ 3 ทำให้ "ผมชื่อโอนะครับ" ได้ "โอนะ"
+    แล้วบอทเรียกเขาว่า "คุณโอนะ" ไปตลอด และเป็นคนละตัวตนกับ "ผมชื่อโอครับ"
+    """
+
+    @pytest.mark.parametrize(
+        "phrase,name",
+        [
+            ("ผมชื่อโอนะครับ", "โอ"),
+            ("หนูชื่อมดนะคะ", "มด"),
+            ("ผมชื่อนกนะครับ", "นก"),
+            ("เรียกผมว่าปอนะครับ", "ปอ"),
+            ("ชื่อบีนะคะ", "บี"),
+            ("ผมชื่อกบนะครับ", "กบ"),
+        ],
+    )
+    def test_ตัดนะออกจากชื่อสองตัวอักษร(self, phrase, name):
+        assert extract_name_claim(phrase) == name
+
+    def test_ชื่อที่ลงท้ายด้วยนะจริงต้องไม่ถูกตัด(self):
+        assert extract_name_claim("ผมชื่อมานะครับ") == "มานะ"
+
+    def test_ชื่อยาวยังทำงานเหมือนเดิม(self):
+        assert extract_name_claim("ผมชื่อสมชายนะครับ") == "สมชาย"
+
+
+class Testคำตอบสั้นตอนบอทถามชื่อ:
+    """``expecting_name`` เป็นบริบทเดียวที่ยอมรับคำเปล่า ๆ เป็นชื่อ
+
+    การเช็คแค่ "ไม่อยู่ในบัญชีดำ" หลวมเกินไป — ตัวเลข วันเดือนปี และคำ
+    อุทานผ่านหมด แล้วกลายเป็นตัวตนถาวรของผู้ใช้
+    """
+
+    @pytest.mark.parametrize(
+        "answer",
+        ["35", "3.5", "5555", "ก.พ.", "อายุ 30", "ทำไมต้องรู้", "เดี๋ยวก่อน",
+         "กำลังขับรถ", "หิวข้าว", "hello", "หมอ", "กรุงเทพ", "ครับ", "ไม่บอก"],
+    )
+    def test_answerที่ไม่ใช่ชื่อต้องถูกปฏิเสธ(self, answer):
+        assert extract_name_claim(answer, expecting_name=True) is None
+
+    @pytest.mark.parametrize(
+        "answer,name",
+        [("เดชครับ", "เดช"), ("นก", "นก"), ("โอค่ะ", "โอ"), ("สมชาย", "สมชาย")],
+    )
+    def test_ชื่อจริงยังผ่าน(self, answer, name):
+        assert extract_name_claim(answer, expecting_name=True) == name

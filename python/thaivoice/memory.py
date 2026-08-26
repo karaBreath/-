@@ -148,12 +148,24 @@ class SpeakerStats:
     last_seen: float | None
 
 
+# ตัวคั่นสำหรับกุญแจของคนชื่อซ้ำ — ต้องเป็นอักขระที่ผู้ใช้พิมพ์เข้ามาไม่ได้
+# ไม่งั้นคนที่พิมพ์ชื่อ "สมชาย#2" จะได้ตัวตน (และความจำ) ของคนอื่นไปเลย
+_DUP_SEP = "\x00"
+
+
 def normalize_name(name: str) -> str:
     """ทำชื่อให้เป็นรูปมาตรฐานสำหรับใช้เทียบและกันซ้ำ
 
     ตัดช่องว่างหัวท้าย ยุบช่องว่างซ้อน และลดเป็นตัวพิมพ์เล็ก
+    อักขระควบคุมถูกตัดทิ้ง เพื่อไม่ให้ชื่อที่ผู้ใช้พิมพ์ชนกับกุญแจภายใน
     """
-    return " ".join((name or "").split()).lower()
+    cleaned = "".join(ch for ch in (name or "") if ch >= " " or ch in "\t\n\r")
+    return " ".join(cleaned.split()).lower()
+
+
+def base_name_key(key: str) -> str:
+    """ตัดส่วนแยกแยะ (#N ภายใน) ออก เหลือกุญแจชื่อฐาน"""
+    return (key or "").split(_DUP_SEP, 1)[0]
 
 
 def _row_to_speaker(row: sqlite3.Row) -> Speaker:
@@ -185,14 +197,23 @@ class MemoryStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            self._conn.executescript(_SCHEMA)
-            self._migrate()
-            self._conn.execute(
-                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.executescript(_SCHEMA)
+                self._migrate()
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+                self._conn.commit()
+        except BaseException:
+            # อย่าปล่อยให้ connection ค้างไว้พร้อม transaction ที่เขียนค้าง
+            # ไม่งั้นการเปิดฐานข้อมูลครั้งถัดไปในโปรเซสเดียวกันจะเจอ "database is locked"
+            try:
+                self._conn.rollback()
+            finally:
+                self._conn.close()
+            raise
 
     def _migrate(self) -> None:
         """อัปเกรดฐานข้อมูลเก่าให้เข้ากับ schema ปัจจุบัน (เรียกใต้ lock แล้ว)"""
@@ -200,16 +221,38 @@ class MemoryStore:
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(speakers)").fetchall()
         }
-        needs_backfill = "name_key" not in columns
-        if needs_backfill:
+        if "name_key" not in columns:
             # ฐานข้อมูลจาก schema เวอร์ชัน 1 — เติมคอลัมน์แล้วเติมค่าย้อนหลัง
             self._conn.execute("ALTER TABLE speakers ADD COLUMN name_key TEXT")
-            for row in self._conn.execute(
-                "SELECT id, display_name FROM speakers"
-            ).fetchall():
+
+        # เติมค่าย้อนหลังให้ทุกแถวที่ยังไม่มีกุญแจ ไม่ใช่เฉพาะตอนเพิ่งเติมคอลัมน์
+        # (ถ้ารอบก่อนล้มกลางคัน ALTER อาจ commit ไปแล้วแต่ค่ายังว่าง)
+        pending = self._conn.execute(
+            "SELECT id, display_name FROM speakers"
+            " WHERE name_key IS NULL OR name_key = '' ORDER BY id"
+        ).fetchall()
+        if pending:
+            taken = {
+                row["name_key"]
+                for row in self._conn.execute(
+                    "SELECT name_key FROM speakers"
+                    " WHERE name_key IS NOT NULL AND name_key <> ''"
+                ).fetchall()
+            }
+            for row in pending:
+                # schema เวอร์ชัน 1 ไม่มี UNIQUE index จึงมีชื่อซ้ำกันได้
+                # ต้องแยกกุญแจให้เอง ไม่งั้น index ที่จะสร้างต่อไปจะพัง
+                # แล้วฐานข้อมูลทั้งก้อนจะเปิดไม่ได้อีกเลย
+                base = normalize_name(row["display_name"])
+                candidate = base
+                index = 2
+                while candidate in taken:
+                    candidate = f"{base}{_DUP_SEP}{index}"
+                    index += 1
+                taken.add(candidate)
                 self._conn.execute(
                     "UPDATE speakers SET name_key = ? WHERE id = ?",
-                    (normalize_name(row["display_name"]), row["id"]),
+                    (candidate, row["id"]),
                 )
 
         # สร้าง index หลัง migration เสมอ เพราะตารางที่มีอยู่แล้วจาก schema เวอร์ชัน 1
@@ -284,7 +327,7 @@ class MemoryStore:
         while self._conn.execute(
             "SELECT 1 FROM speakers WHERE name_key = ?", (candidate,)
         ).fetchone():
-            candidate = f"{base}#{index}"
+            candidate = f"{base}{_DUP_SEP}{index}"
             index += 1
         return candidate
 
@@ -333,6 +376,31 @@ class MemoryStore:
             ).fetchone()
         return _row_to_speaker(row) if row else None
 
+    def find_speakers_by_name(self, name: str) -> list[Speaker]:
+        """หาทุกคนที่ใช้ชื่อนี้ — รวมคนที่ชื่อซ้ำกันแต่เป็นคนละตัวตน
+
+        ``find_speaker_by_name`` คืนแค่คนล่าสุดคนเดียว ซึ่งไม่พอสำหรับการ
+        ตัดสินว่าเสียงที่ได้ยินตรงกับ "สมชาย" คนไหน
+        """
+        needle = normalize_name(name)
+        if not needle:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM speakers
+                   WHERE name_key = ? OR name_key LIKE ? ESCAPE '\\'
+                      OR lower(trim(nickname)) = ?
+                   ORDER BY last_seen_at DESC""",
+                (
+                    needle,
+                    needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    + _DUP_SEP
+                    + "%",
+                    needle,
+                ),
+            ).fetchall()
+        return [_row_to_speaker(r) for r in rows]
+
     def list_speakers(self) -> list[Speaker]:
         with self._lock:
             rows = self._conn.execute(
@@ -352,6 +420,7 @@ class MemoryStore:
         }
         sets: list[str] = []
         values: list[Any] = []
+        rename_to: str | None = None
         for key, value in fields.items():
             if key == "meta":
                 sets.append("meta_json = ?")
@@ -361,11 +430,21 @@ class MemoryStore:
                 values.append(value)
                 if key == "display_name":
                     sets.append("name_key = ?")
-                    values.append(normalize_name(str(value)))
+                    rename_to = normalize_name(str(value))
+                    values.append(rename_to)
         if not sets:
             return self.get_speaker(speaker_id)
         values.append(speaker_id)
         with self._lock:
+            if rename_to is not None:
+                # ถ้ากุญแจใหม่ถูกคนอื่นจองไว้แล้ว ให้หากุญแจว่างแทนที่จะโยน
+                # IntegrityError ทิ้งไว้ให้ผู้เรียกกลืน แล้วอัปเดตครึ่ง ๆ กลาง ๆ
+                clash = self._conn.execute(
+                    "SELECT id FROM speakers WHERE name_key = ? AND id <> ?",
+                    (rename_to, speaker_id),
+                ).fetchone()
+                if clash is not None:
+                    values[sets.index("name_key = ?")] = self._free_name_key(rename_to)
             self._conn.execute(
                 f"UPDATE speakers SET {', '.join(sets)} WHERE id = ?", values
             )

@@ -1,5 +1,7 @@
 """ทดสอบชั้นความจำ — ความถูกต้องตรงนี้คือหัวใจของ "จดจำผู้สนทนาได้" """
 
+import sqlite3
+
 import pytest
 
 from thaivoice.memory import MemoryStore
@@ -176,3 +178,86 @@ def test_สถิติผู้สนทนา(store: MemoryStore):
     assert stats.turns == 2
     assert stats.facts == 1
     assert stats.first_seen is not None
+
+
+class Testการอัปเกรดฐานข้อมูลเก่า:
+    """schema เวอร์ชัน 1 ไม่มี UNIQUE index จึงมีชื่อซ้ำกันได้จริง
+
+    ของเดิมสร้าง index ทับโดยไม่แยกกุญแจก่อน ฐานข้อมูลจึงเปิดไม่ได้อีกเลย
+    แล้วยัง leak connection ที่ค้าง transaction ไว้ ทำให้เปิดครั้งต่อไปเจอ
+    "database is locked"
+    """
+
+    def _v1(self, path):
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE speakers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              display_name TEXT NOT NULL, nickname TEXT, gender TEXT,
+              particle TEXT, language TEXT DEFAULT 'th', notes TEXT,
+              meta_json TEXT DEFAULT '{}', created_at REAL, last_seen_at REAL);
+            """
+        )
+        for name in ("สมชาย", "  สมชาย  ", "สมชาย", "นก"):
+            conn.execute(
+                "INSERT INTO speakers (display_name, created_at, last_seen_at)"
+                " VALUES (?, 1, 1)",
+                (name,),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_ชื่อซ้ำจากเวอร์ชัน1ต้องเปิดได้และหาเจอครบ(self, tmp_path):
+        path = tmp_path / "v1.db"
+        self._v1(path)
+
+        store = MemoryStore(path)
+        try:
+            assert store.find_speaker_by_name("สมชาย") is not None
+            assert store.find_speaker_by_name("นก") is not None
+            assert len(store.find_speakers_by_name("สมชาย")) == 3
+            keys = [
+                row["name_key"]
+                for row in store._conn.execute(
+                    "SELECT name_key FROM speakers"
+                ).fetchall()
+            ]
+            assert all(k for k in keys), "ทุกแถวต้องมีกุญแจ ไม่ใช่ NULL ค้างไว้"
+            assert len(set(keys)) == len(keys)
+        finally:
+            store.close()
+
+    def test_เปิดซ้ำต้องไม่พังและไม่ล็อก(self, tmp_path):
+        path = tmp_path / "v1.db"
+        self._v1(path)
+        for _ in range(3):
+            store = MemoryStore(path)
+            assert store.find_speaker_by_name("นก") is not None
+            store.close()
+
+
+class Testกุญแจของคนชื่อซ้ำต้องพิมพ์ไม่ได้:
+    def test_ชื่อที่มีเครื่องหมายชาร์ปไม่ไปโดนตัวตนคนอื่น(self, store):
+        first = store.create_speaker("สมชาย")
+        second = store.create_speaker("สมชาย", allow_duplicate_name=True)
+        store.upsert_fact(second.id, "โรคประจำตัว", "เบาหวาน")
+
+        assert first.id != second.id
+        # ของเดิมกุญแจเป็น "สมชาย#2" ซึ่งผู้ใช้พิมพ์เข้ามาได้ แล้วได้ตัวตน
+        # (พร้อมความจำเรื่องโรคประจำตัว) ของคนอื่นไปเลย
+        assert store.find_speaker_by_name("สมชาย#2") is None
+        found, created = store.get_or_create_speaker("สมชาย#2")
+        assert created is True
+        assert found.id not in (first.id, second.id)
+
+    def test_เปลี่ยนชื่อไปชนกุญแจคนอื่นต้องไม่ระเบิด(self, store):
+        a = store.create_speaker("สมชาย")
+        b = store.create_speaker("มาลี")
+
+        updated = store.update_speaker(b.id, display_name="สมชาย")
+
+        assert updated is not None
+        assert updated.display_name == "สมชาย"
+        assert store.get_speaker(a.id) is not None
+        assert {s.id for s in store.find_speakers_by_name("สมชาย")} == {a.id, b.id}

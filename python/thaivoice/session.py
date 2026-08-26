@@ -80,14 +80,33 @@ _FIRST_PERSON_FORGOT = re.compile(_SELF + r"\s*(?:ก็|เลย)?\s*ลืม
 # ตั้งใจให้แคบมาก — ครอบเฉพาะสำนวนที่เราสั่งให้บอทใช้ถามชื่อคู่สนทนาเท่านั้น
 # ของเดิมจับคำว่า "ชื่ออะไร" ลอย ๆ ซึ่งติดกับคำถามอย่าง "หมาคุณชื่ออะไรคะ" หรือ
 # "ร้านนั้นชื่ออะไรคะ" ด้วย พอติดแล้วคำตอบสั้น ๆ ของผู้ใช้จะถูกตีความเป็นชื่อเขาเอง
+#
+# รอบก่อนยังหลวมอยู่: ทุกแพตเทิร์นถูก search แบบไม่ยึดขอบ ทำให้
+# "ขอชื่อร้านหน่อยครับ" "หมาคุณชื่ออะไรคะ" "แนะนำตัวเลือกที่ดีที่สุด"
+# "แนะนำตัวแทนจำหน่าย" "แล้วเพลงนั้นเรียกว่าอะไรคะ" ติดหมด พอติดแล้ว
+# คำตอบถัดไปของผู้ใช้ ("ครัวคุณต๋อย") จะกลายเป็น *ชื่อของเขาเอง* — ตัวตนถูก
+# สลับ ความจำเดิมกำพร้า และลายเสียงถูกผูกกับตัวตนปลอม
+#
+# กติกาที่ใช้ตอนนี้
+#   * ขอบซ้าย: ห้ามมีตัวอักษรไทย/ละตินนำหน้า (กัน "หมาคุณชื่ออะไร")
+#   * ขอบขวา: ต้องตามด้วยคำขอ/คำลงท้าย/จบประโยค (กัน "ขอชื่อร้าน")
+_NAME_Q_LEFT = r"(?<![ก-๛A-Za-z])"
+_NAME_Q_END = r"(?=[\s\?\.!,]|ครับ|ค่ะ|คะ|นะ|ได้ไหม|ได้มั้ย|หรือ|$)"
 _ASKED_FOR_NAME = re.compile(
-    r"(?:เรียก(?:คุณ|ผม|ฉัน|หนู)?ว่าอะไร"
-    r"|เรียกว่าอะไรดี"
-    r"|ขอทราบชื่อ"
-    r"|ขอชื่อ"
-    r"|คุณชื่ออะไร"
-    r"|ยังไม่ทราบชื่อ"
-    r"|แนะนำตัว)"
+    "(?:"
+    # ระบุสรรพนามชัดเจน — ปลอดภัยพอโดยไม่ต้องยึดขอบซ้าย
+    r"เรียก(?:คุณ|ผม|ฉัน|หนู|เธอ)ว่าอะไร"
+    # "เรียกว่าอะไรดี" ลอย ๆ ต้องขึ้นต้นวรรค ไม่งั้นเป็นการถามชื่อของสิ่งอื่น
+    + f"|{_NAME_Q_LEFT}" + r"เรียกว่าอะไร(?:ดี)?"
+    + f"|{_NAME_Q_LEFT}" + r"คุณชื่ออะไร"
+    + f"|{_NAME_Q_LEFT}" + r"ยังไม่(?:ทราบ|รู้จัก)ชื่อ(?:คุณ|ท่าน|เธอ)?"
+    # "ขอชื่อ/ขอทราบชื่อ" ต้องตามด้วยคำขอทันที ห้ามมีคำนามคั่น
+    + f"|{_NAME_Q_LEFT}" + r"ขอ(?:ทราบ)?ชื่อ(?:คุณ|ท่าน|เธอ)?"
+    r"(?:หน่อย|ด้วย|ได้ไหม|ได้มั้ย|สักหน่อย)"
+    # "แนะนำตัว" ต้องไม่ต่อด้วยคำอื่น (แนะนำตัวเลือก/ตัวแทน/ตัวเอง)
+    + f"|{_NAME_Q_LEFT}" + r"แนะนำตัว(?:สัก)?(?:หน่อย|เลย|กัน|ให้ฟัง|ให้หน่อย)?"
+    + _NAME_Q_END
+    + ")"
 )
 
 # หมายเหตุ: ห้ามใช้ \b กับคำไทย เพราะคำไทยจำนวนมากลงท้ายด้วยวรรณยุกต์ (เช่น "ใช่"
@@ -406,12 +425,16 @@ class ConversationSession:
             pending_id = self._pending_forget
             expired = time.time() - self._pending_forget_at > FORGET_CONFIRM_TIMEOUT
             same_person = speaker is not None and speaker.id == pending_id
+            # หมดเวลา หรือคนอื่นพูดแทรกขึ้นมา — ทั้งสองกรณีต้อง *ไม่* return ทิ้ง
+            # ไปเฉย ๆ เพราะประโยคที่กำลังพิจารณาอยู่นี้อาจเป็นคำขอลบอันใหม่
+            # ของบ๊อกคนที่พูด ของเดิมกลืนมันหายไปให้โมเดลตอบว่า "ลบให้แล้ว"
+            # ทั้งที่ไม่ได้ลบอะไรเลย
             if expired:
                 self._pending_forget = None
-                return None
+                return self._new_forget_request(transcript, speaker, speak)
             if not same_person:
-                # คนอื่นพูดขึ้นมาระหว่างรอ — ไม่ยกเลิกคำขอของเจ้าตัว
-                return None
+                # ไม่ยกเลิกคำขอของเจ้าตัวที่ยังค้างอยู่ แต่ก็ต้องรับคำขอของคนนี้
+                return self._new_forget_request(transcript, speaker, speak)
             answer = is_affirmative(transcript)
             if answer is True:
                 self._pending_forget = None
@@ -425,23 +448,38 @@ class ConversationSession:
                     f"เริ่มรู้จักกันใหม่ได้เลย{particle}",
                     speaker,
                     speak,
+                    user_text=transcript,
                 )
-            self._pending_forget = None
             if answer is False:
+                self._pending_forget = None
                 return self._say(
                     f"ได้{particle} งั้นไม่ลบนะ{_soft(particle)} ความจำทั้งหมดยังอยู่ครบ",
                     speaker,
                     speak,
+                    user_text=transcript,
                 )
             # ตอบเป็นอย่างอื่น -> ยังไม่ลบ และบอกให้ชัดว่าไม่ได้ลบอะไร
-            # ของเดิมเงียบแล้วไปคุยเรื่องอื่นต่อ ผู้ใช้จึงไม่รู้ว่าตกลงลบหรือยัง
+            # ของเดิมเคลียร์ _pending_forget ทิ้ง *ก่อน* จะบอกให้ผู้ใช้พูดว่า
+            # "ยืนยัน" ผู้ใช้พูดตามแล้วไม่มีอะไรเกิดขึ้น โมเดลตอบเองว่า
+            # "จัดการให้แล้วครับ" ทั้งที่ข้อมูลยังอยู่ครบ — คำสั่งลบที่ผู้ใช้
+            # เชื่อว่าทำไปแล้วแต่ไม่ได้ทำ เป็นบั๊กที่ยอมไม่ได้
+            # จึงคงสถานะรอไว้และรีเซ็ตนาฬิกาให้ตอบทันเสมอ
+            self._pending_forget_at = time.time()
             return self._say(
                 f'ยังไม่ได้ลบอะไรนะ{_soft(particle)} ถ้าจะลบจริง ๆ พูดว่า "ยืนยัน" '
                 f"ได้เลย{particle}",
                 speaker,
                 speak,
+                user_text=transcript,
             )
 
+        return self._new_forget_request(transcript, speaker, speak)
+
+    def _new_forget_request(
+        self, transcript: str, speaker: Speaker | None, speak: bool
+    ) -> Iterator[SessionEvent] | None:
+        """รับคำขอลบความจำอันใหม่ คืน ``None`` ถ้าประโยคนี้ไม่ใช่คำขอลบ"""
+        particle = self.settings.assistant_particle
         if not detect_forget_all(transcript):
             return None
 
@@ -451,6 +489,7 @@ class ConversationSession:
                 f"ตอนนี้ยังไม่รู้ว่าคุยอยู่กับใคร เลยยังไม่มีความจำอะไรให้ลบ{particle}",
                 None,
                 speak,
+                user_text=transcript,
             )
 
         self._pending_forget = speaker.id
@@ -458,22 +497,37 @@ class ConversationSession:
         stats = self.store.stats(speaker.id)
         return self._say(
             f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}ทั้งหมด "
-            f"ทั้งสิ่งที่จำไว้ {stats.facts} เรื่อง และบทสนทนา {stats.turns} ข้อความ "
+            f"ทั้งสิ่งที่จำไว้ {stats.facts} เรื่อง บทสรุปทั้งหมด "
+            f"และบทสนทนา {stats.turns} ข้อความ "
             f"ลบแล้วกู้คืนไม่ได้ "
             f"ส่วนเสียงที่ใช้จำว่าเป็นคุณจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี "
             f'ถ้าแน่ใจ พูดว่า "ยืนยัน" ได้เลย{particle}',
             speaker,
             speak,
+            user_text=transcript,
         )
 
     def _say(
-        self, text: str, speaker: Speaker | None, speak: bool
+        self,
+        text: str,
+        speaker: Speaker | None,
+        speak: bool,
+        user_text: str | None = None,
     ) -> Iterator[SessionEvent]:
-        """ตอบข้อความที่ระบบเขียนเอง (ไม่ผ่านโมเดล) และบันทึกลงบทสนทนา"""
+        """ตอบข้อความที่ระบบเขียนเอง (ไม่ผ่านโมเดล) และบันทึกลงบทสนทนา
+
+        ``user_text`` คือประโยคที่ทำให้เกิดคำตอบนี้ ต้องบันทึกด้วย ไม่งั้น
+        บทสนทนาจะมีแต่คำตอบลอย ๆ ("ลบให้เรียบร้อยแล้วค่ะ") โดยไม่มีคำขอ
+        และเทิร์นถัดไปที่ส่งให้โมเดลจะเห็น assistant ติดกันหลายอันรวด
+        """
 
         def generate() -> Iterator[SessionEvent]:
             self._note_assistant_reply(text)
             if speaker is not None and self.store.speaker_exists(speaker.id):
+                if user_text and user_text.strip():
+                    self.store.record_turn(
+                        speaker.id, self.session_id, "user", user_text
+                    )
                 self.store.record_turn(speaker.id, self.session_id, "assistant", text)
             yield SessionEvent(
                 "chunk",
