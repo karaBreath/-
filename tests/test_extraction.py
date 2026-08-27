@@ -305,3 +305,95 @@ class Testความจำที่ถูกลบต้องไม่ฟื�
         extractor.shutdown(wait=True)
 
         assert store.facts_for(speaker.id) == [], "ข้อเท็จจริงฟื้นคืนมาหลังลบ"
+
+
+class Testด่านรุ่นความจำของบทสรุป:
+    """ด่านนี้เคยไม่มีเทสต์เลย — ถอดออกแล้วชุดทดสอบยังเขียวทั้งชุด"""
+
+    def test_ลบระหว่างสรุปแล้วบทสรุปต้องไม่ถูกบันทึก(self, store, settings):
+        import threading
+
+        speaker = store.create_speaker("เดช")
+        for i in range(4):
+            store.record_turn(speaker.id, "s", "user", f"ข้อความที่ {i}")
+
+        เริ่มแล้ว = threading.Event()
+        ลบเสร็จ = threading.Event()
+        client = FakeAnthropic()
+
+        class ช้า:
+            """``FakeAnthropic.messages`` เป็น property ที่สร้างวัตถุใหม่ทุกครั้ง
+            การแพตช์ ``client.messages.create`` ตรง ๆ จึงไม่ติด"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            @property
+            def messages(self):
+                inner = self._inner.messages
+
+                class หน่วง:
+                    def create(_self, **kwargs):
+                        เริ่มแล้ว.set()
+                        ลบเสร็จ.wait(timeout=5)
+                        return inner.create(**kwargs)
+
+                return หน่วง()
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        extractor = MemoryExtractor(store, ช้า(client), settings)
+        extractor._submit(
+            extractor._safe_summarize, speaker, store.memory_epoch(speaker.id)
+        )
+
+        assert เริ่มแล้ว.wait(timeout=5)
+        store.forget_everything(speaker.id)
+        ลบเสร็จ.set()
+        extractor.shutdown(wait=True)
+
+        assert store.latest_summary(speaker.id) is None, "บทสรุปฟื้นคืนมาหลังลบ"
+
+    def test_คนถูกลบระหว่างสกัดแล้วต้องไม่เขียนกลับ(self, store, settings):
+        """ด่าน speaker_exists ก็ไม่มีเทสต์เช่นกัน"""
+        import threading
+
+        speaker = store.create_speaker("เดช")
+        store.record_turn(speaker.id, "s", "user", "ผมเป็นหมอครับ")
+        turns = store.recent_turns(speaker.id)
+
+        เริ่มแล้ว = threading.Event()
+        ลบเสร็จ = threading.Event()
+        client = FakeAnthropic()
+        client.parsed_outputs = [
+            MemoryUpdate(
+                facts=[
+                    ExtractedFact(
+                        key="อาชีพ", value="หมอ", category="งาน", confidence=0.9
+                    )
+                ],
+                forget_keys=[],
+                display_name="",
+                nickname="",
+                gender="unknown",
+            )
+        ]
+        extractor = MemoryExtractor(store, client, settings)
+        original = extractor._call_model
+
+        def slow(prompt):
+            เริ่มแล้ว.set()
+            ลบเสร็จ.wait(timeout=5)
+            return original(prompt)
+
+        extractor._call_model = slow
+        # ส่ง epoch เป็น None เพื่อให้เหลือแต่ด่าน speaker_exists ทำงานจริง
+        extractor._submit(extractor._safe_run, speaker, turns, None)
+
+        assert เริ่มแล้ว.wait(timeout=5)
+        store.delete_speaker(speaker.id)
+        ลบเสร็จ.set()
+        extractor.shutdown(wait=True)
+
+        assert store.facts_for(speaker.id) == [], "เขียนความจำให้คนที่ถูกลบไปแล้ว"

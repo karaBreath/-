@@ -300,3 +300,62 @@ class Testตารางรุ่นความจำ:
         before = store.memory_epoch(speaker.id)
         assert store.delete_speaker(speaker.id) is True
         assert store.memory_epoch(speaker.id) > before
+
+
+class Testเขียนได้ต่อเมื่อรุ่นความจำยังเดิม:
+    """`apply_if_epoch` ต้องกันคำสั่งลบไม่ให้แทรกกลางการเขียน
+
+    การ "ตรวจแล้วค่อยเขียน" แยกกันไม่อะตอมมิก งานสกัดเบื้องหลังเคยตรวจใต้ lock
+    ของตัวเอง ซึ่งคนละตัวกับที่ `forget_everything` ถือ คำสั่งลบจึงแทรกได้ทั้ง
+    ระหว่างตรวจกับเขียน และระหว่างการเขียนข้อเท็จจริงสองข้อ
+    """
+
+    def test_รุ่นตรงกันต้องเขียนได้(self, store):
+        speaker = store.create_speaker("เดช")
+        epoch = store.memory_epoch(speaker.id)
+        assert store.apply_if_epoch(
+            speaker.id, epoch, lambda: store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        )
+        assert store.facts_for(speaker.id)
+
+    def test_รุ่นเปลี่ยนแล้วต้องไม่เขียน(self, store):
+        speaker = store.create_speaker("เดช")
+        epoch = store.memory_epoch(speaker.id)
+        store.forget_everything(speaker.id)
+        assert not store.apply_if_epoch(
+            speaker.id, epoch, lambda: store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        )
+        assert store.facts_for(speaker.id) == []
+
+    def test_คนถูกลบไปแล้วต้องไม่เขียน(self, store):
+        speaker = store.create_speaker("เดช")
+        store.delete_speaker(speaker.id)
+        # ส่ง epoch เป็น None เพื่อให้เหลือแต่ด่าน "คนนี้ยังอยู่ไหม" ทำงานจริง
+        # ไม่งั้นด่านรุ่นความจำจะบังมันไว้ (delete_speaker เลื่อนรุ่นไปแล้ว)
+        # แล้วเทสต์นี้จะผ่านแม้ถอดด่านนั้นออกทั้งอัน
+        assert not store.apply_if_epoch(
+            speaker.id, None, lambda: store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        )
+
+    def test_คำสั่งลบต้องแทรกกลางการเขียนไม่ได้(self, store):
+        """เธรดหนึ่งเขียน 30 ข้อ อีกเธรดสั่งลบ — ต้องไม่เหลือรอดแม้ข้อเดียว"""
+        import threading
+
+        speaker = store.create_speaker("เดช")
+        epoch = store.memory_epoch(speaker.id)
+        กำลังเขียน = threading.Event()
+
+        def write():
+            for i in range(30):
+                store.upsert_fact(speaker.id, f"k{i}", "ค่า")
+                กำลังเขียน.set()
+
+        worker = threading.Thread(
+            target=lambda: store.apply_if_epoch(speaker.id, epoch, write)
+        )
+        worker.start()
+        assert กำลังเขียน.wait(timeout=5)
+        store.forget_everything(speaker.id)
+        worker.join(timeout=5)
+
+        assert store.facts_for(speaker.id) == [], "ความจำรอดจากคำสั่งลบ"

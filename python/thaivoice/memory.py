@@ -480,10 +480,13 @@ class MemoryStore:
             cur = self._conn.execute("DELETE FROM speakers WHERE id = ?", (speaker_id,))
             # เลื่อนรุ่นเฉพาะเมื่อลบได้จริง ไม่งั้นคำขอลบ id ที่ไม่มีอยู่จะ
             # สร้างรายการใหม่ในตารางรุ่นทุกครั้ง และไม่มีอะไรมาเก็บกวาดเลย
+            #
+            # ไม่ลบกุญแจทิ้งด้วย — การกด DELETE ซ้ำ (retry/ดับเบิลคลิก) จะรีเซ็ต
+            # รุ่นกลับเป็นศูนย์ ตอนนี้ยังไม่เป็นอันตรายเพราะ id ไม่ถูกใช้ซ้ำ
+            # (AUTOINCREMENT) แต่การพึ่งเกราะชั้นเดียวไม่คุ้ม การไม่เลื่อนก็พอแล้ว
+            # ตารางไม่โต เพราะ id ที่ไม่มีจริงย่อมไม่มีรายการอยู่ก่อน
             if cur.rowcount > 0:
                 self._bump_memory_epoch(speaker_id)
-            else:
-                self._memory_epoch.pop(speaker_id, None)
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -681,6 +684,11 @@ class MemoryStore:
             )
             # เส้นทางลบทุกเส้นต้องเลื่อนรุ่นความจำ ไม่งั้นงานสกัดที่ค้างอยู่จะ
             # เขียนข้อเท็จจริงกลับเข้าไปหลัง API รายงานว่าลบแล้ว
+            #
+            # เลื่อน *เสมอ* แม้ลบได้ศูนย์แถว: การลบตอนที่ยังไม่มีแถวไม่ได้แปลว่า
+            # ไม่มีอะไรต้องลบ — งานสกัดที่ค้างอยู่กำลังจะเขียนแถวเข้ามาพอดี
+            # การเช็ค rowcount ตรงนี้จึงเปิดช่องให้ความจำฟื้นคืนหลังผู้ใช้สั่งลบ
+            # ยอมทิ้งงานสกัดที่ถูกต้องบ้าง ดีกว่าเก็บสิ่งที่ผู้ใช้สั่งให้ลืมไว้
             self._bump_memory_epoch(speaker_id)
             self._conn.commit()
             return cur.rowcount
@@ -703,9 +711,31 @@ class MemoryStore:
                     "DELETE FROM turns WHERE speaker_id = ?", (speaker_id,)
                 ).rowcount,
             }
+            # เลื่อนเสมอด้วยเหตุผลเดียวกับ forget_all_facts ข้างบน
             self._bump_memory_epoch(speaker_id)
             self._conn.commit()
         return {key: max(0, value) for key, value in removed.items()}
+
+    def apply_if_epoch(self, speaker_id: int, epoch: int | None, write) -> bool:
+        """เรียก ``write()`` ก็ต่อเมื่อความจำยังเป็นรุ่นเดิมและคนคนนี้ยังอยู่
+
+        คืน ``True`` ถ้าเขียนจริง
+
+        ต้องมีเมธอดนี้เพราะการ "ตรวจแล้วค่อยเขียน" แยกกันนั้นไม่อะตอมมิก
+        งานสกัดเบื้องหลังเคยตรวจรุ่นความจำใต้ lock *ของตัวมันเอง* ซึ่งคนละตัวกับ
+        lock ที่ ``forget_everything`` ถือ คำสั่งลบจึงแทรกเข้ามาระหว่างการตรวจกับ
+        การเขียน หรือแม้แต่ระหว่างการเขียนข้อเท็จจริงสองข้อได้ ผลคือผู้ใช้ได้ยินว่า
+        "ลบเรียบร้อยแล้ว" แล้วความจำบางส่วนยังอยู่ — วัดได้จริงราว 18% ของจังหวะ
+        ที่ชนกัน การถือ lock ตัวเดียวกันตลอดทั้งช่วงปิดช่องนี้ และยังทำให้การเขียน
+        ทั้งชุดเป็นทรานแซกชันเดียวแทนที่จะ commit ทีละแถวด้วย
+        """
+        with self._lock:
+            if epoch is not None and self._memory_epoch.get(speaker_id, 0) != epoch:
+                return False
+            if not self._speaker_exists_locked(speaker_id):
+                return False
+            write()
+            return True
 
     def memory_epoch(self, speaker_id: int) -> int:
         """รุ่นความจำปัจจุบันของคนคนนี้ — เพิ่มขึ้นทุกครั้งที่ความจำถูกล้าง"""
@@ -727,9 +757,13 @@ class MemoryStore:
 
     def speaker_exists(self, speaker_id: int) -> bool:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM speakers WHERE id = ?", (speaker_id,)
-            ).fetchone()
+            return self._speaker_exists_locked(speaker_id)
+
+    def _speaker_exists_locked(self, speaker_id: int) -> bool:
+        """เรียกใต้ lock แล้ว"""
+        row = self._conn.execute(
+            "SELECT 1 FROM speakers WHERE id = ?", (speaker_id,)
+        ).fetchone()
         return row is not None
 
     # ── บทสรุปสะสม ──────────────────────────────────────────────────────

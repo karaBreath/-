@@ -522,7 +522,11 @@ class ConversationSession:
         self._note_assistant_reply(reply)
         if speaker is not None and reply:
             self.store.record_turn(speaker.id, self.session_id, "assistant", reply)
-            self._remember(speaker)
+            # ระหว่างที่คำขอลบยังรอยืนยันอยู่ ห้ามสั่งงานสกัดความจำ — มันจะเขียน
+            # ความจำใหม่เข้าไปในหน้าต่างเดียวกับที่ผู้ใช้กำลังจะสั่งลบทุกอย่าง
+            # และยังเอาประโยค "ลืมทุกอย่างเกี่ยวกับฉัน" ไปเข้าโมเดลสกัดด้วย
+            if speaker.id not in self._pending_forget:
+                self._remember(speaker)
 
         yield SessionEvent("done", text=reply, speaker=speaker, identification=ident)
 

@@ -702,3 +702,33 @@ class Testบอทเรียกตัวเองด้วยชื่อต�
         assert session._asked_for_name
         session._note_assistant_reply("วันนี้อากาศดีค่ะ")
         assert not session._asked_for_name
+
+
+class Testห้ามสกัดความจำระหว่างรอยืนยันการลบ:
+    """หน้าต่างระหว่าง "ขอลบ" กับ "ยืนยัน" ต้องไม่มีการเขียนความจำใหม่
+
+    ไม่งั้นงานสกัดจะเขียนความจำเข้าไปในจังหวะเดียวกับที่ผู้ใช้กำลังจะสั่งลบ
+    ทั้งยังเอาประโยค "ลืมทุกอย่างเกี่ยวกับฉัน" ไปเข้าโมเดลสกัดด้วย
+    """
+
+    def test_เทิร์นที่ตอบไม่ชัดต้องไม่สั่งงานสกัด(self, session, store):
+        สั่งไปแล้ว: list[str] = []
+
+        class เก็บงาน:
+            def schedule(self, speaker, turns):
+                สั่งไปแล้ว.append("schedule")
+
+            def maybe_summarize(self, speaker):
+                สั่งไปแล้ว.append("summarize")
+
+        session.extractor = เก็บงาน()
+        speaker = session.register_speaker("เดช")
+
+        session.exchange("สวัสดี", speaker=speaker, speak=False)
+        assert สั่งไปแล้ว, "เทิร์นปกติต้องสั่งงานสกัดตามเดิม"
+        สั่งไปแล้ว.clear()
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+
+        assert สั่งไปแล้ว == [], "สั่งงานสกัดทั้งที่คำขอลบยังรอยืนยันอยู่"

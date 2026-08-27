@@ -206,18 +206,19 @@ class MemoryExtractor:
         if update is None:
             return None
 
+        # ผู้ใช้อาจสั่งลบความจำระหว่างที่โมเดลกำลังทำงาน และได้ยินไปแล้วว่า
+        # "ลบเรียบร้อยแล้ว" การเขียนผลที่สกัดจากบทสนทนาที่ถูกลบไปแล้วกลับเข้าไป
+        # เท่ากับโกหกผู้ใช้ว่าข้อมูลหายไปทั้งที่ยังอยู่
+        #
+        # การตรวจกับการเขียนต้องอยู่ใต้ lock *ตัวเดียวกับที่คำสั่งลบถือ* ไม่งั้น
+        # คำสั่งลบแทรกกลางได้ (ดู MemoryStore.apply_if_epoch)
         with self._lock:
-            # ผู้ใช้อาจสั่งลบความจำระหว่างที่โมเดลกำลังทำงาน และได้ยินไปแล้วว่า
-            # "ลบเรียบร้อยแล้ว" การเขียนผลที่สกัดจากบทสนทนาที่ถูกลบไปแล้วกลับเข้าไป
-            # เท่ากับโกหกผู้ใช้ว่าข้อมูลหายไปทั้งที่ยังอยู่
-            if epoch is not None and self.store.memory_epoch(speaker.id) != epoch:
-                log.info(
-                    "ความจำของ speaker %s ถูกล้างระหว่างสกัด — ทิ้งผล", speaker.id
-                )
-                return None
-            if not self.store.speaker_exists(speaker.id):
-                return None
-            self._apply(speaker, update, turns)
+            wrote = self.store.apply_if_epoch(
+                speaker.id, epoch, lambda: self._apply(speaker, update, turns)
+            )
+        if not wrote:
+            log.info("ความจำของ speaker %s ถูกล้างระหว่างสกัด — ทิ้งผล", speaker.id)
+            return None
         return update
 
     def _call_model(self, prompt: str) -> MemoryUpdate | None:
@@ -321,10 +322,12 @@ class MemoryExtractor:
         if not text:
             return
         # เช่นเดียวกับการสกัดข้อเท็จจริง — ถ้าความจำถูกล้างระหว่างทาง
-        # บทสรุปนี้เป็นของบทสนทนาที่ถูกลบไปแล้ว
-        if epoch is not None and self.store.memory_epoch(speaker.id) != epoch:
+        # บทสรุปนี้เป็นของบทสนทนาที่ถูกลบไปแล้ว และต้องตรวจใต้ lock ตัวเดียวกับ
+        # ที่คำสั่งลบถือ ไม่งั้นคำสั่งลบแทรกระหว่างการตรวจกับการเขียนได้
+        wrote = self.store.apply_if_epoch(
+            speaker.id,
+            epoch,
+            lambda: self.store.save_summary(speaker.id, text, turns[-1].id),
+        )
+        if not wrote:
             log.info("ความจำของ speaker %s ถูกล้างระหว่างสรุป — ทิ้งผล", speaker.id)
-            return
-        if not self.store.speaker_exists(speaker.id):
-            return
-        self.store.save_summary(speaker.id, text, turns[-1].id)
