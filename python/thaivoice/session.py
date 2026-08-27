@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 import time
+import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, Iterator, Sequence
 
 from .brain import ThaiBrain
@@ -33,6 +34,7 @@ log = logging.getLogger("thaivoice.session")
 # คำขอลบความจำต้องยืนยันภายในเวลานี้ ไม่งั้นถือว่าเลิกล้ม
 # ป้องกันคำว่า "ยืนยัน" ที่พูดขึ้นมาลอย ๆ อีกครึ่งชั่วโมงต่อมาไปลบข้อมูลทิ้ง
 FORGET_CONFIRM_TIMEOUT = 120.0
+
 
 __all__ = [
     "ConversationSession",
@@ -130,9 +132,30 @@ _NAME_Q_ALTERNATIVES = (
     # "แนะนำตัว" ต้องไม่ต่อด้วยคำอื่น (แนะนำตัวเลือก/ตัวแทน/ตัวเอง)
     _NAME_Q_LEFT + r"แนะนำตัว(?:สัก)?(?:กัน)?(?:หน่อย|เลย|ให้ฟัง|ให้หน่อย)?",
 )
-_ASKED_FOR_NAME = re.compile(
-    "(?:" + "|".join(_NAME_Q_ALTERNATIVES) + ")" + _NAME_Q_END
-)
+def _asked_for_name_re(assistant_name: str = "") -> re.Pattern[str]:
+    """แพตเทิร์น "บอทเพิ่งถามชื่อ" ที่ยอมให้บอทเรียกตัวเองด้วยชื่อของมันเอง
+
+    prompt สั่งให้บอทเรียกตัวเองว่า "{ชื่อ}" มันจึงตอบว่า "ใจขอทราบชื่อหน่อย
+    ได้ไหมคะ" ชื่อที่นำหน้าเป็นอักษรไทย ขอบซ้ายจึงไม่ติด แพตเทิร์นอ่านไม่ออกว่า
+    เพิ่งถามชื่อไป คำตอบสั้น ๆ ของผู้ใช้ ("เดชครับ") เลยไม่ถูกรับเป็นชื่อเลย
+    """
+    prefixes = _NAME_Q_PREFIXES
+    name = (assistant_name or "").strip()
+    if name and name not in prefixes:
+        prefixes = prefixes + (name,)
+    left = (
+        "(?:(?<![ก-๛A-Za-z])"
+        + "".join(f"|(?<={re.escape(prefix)})" for prefix in prefixes)
+        + ")"
+    )
+    alternatives = tuple(
+        alt.replace(_NAME_Q_LEFT, left) for alt in _NAME_Q_ALTERNATIVES
+    )
+    return re.compile("(?:" + "|".join(alternatives) + ")" + _NAME_Q_END)
+
+
+_asked_for_name_re_cached = lru_cache(maxsize=8)(_asked_for_name_re)
+_ASKED_FOR_NAME = _asked_for_name_re()
 
 # หมายเหตุ: ห้ามใช้ \b กับคำไทย เพราะคำไทยจำนวนมากลงท้ายด้วยวรรณยุกต์ (เช่น "ใช่"
 # "ไม่") ซึ่งเป็นอักขระผสมที่ Python ไม่นับเป็น word character ทำให้ \b ไม่ match
@@ -264,6 +287,13 @@ def _soft(particle: str) -> str:
     """รูปของคำลงท้ายเมื่อตามหลัง "นะ" — ภาษาไทยใช้ "นะคะ" ไม่ใช่ "นะค่ะ" """
     return "คะ" if particle == "ค่ะ" else particle
 
+def _forget_expired_notice(particle: str) -> str:
+    """ข้อความบอกว่าคำขอลบความจำหมดอายุแล้ว ไม่มีอะไรถูกลบ"""
+    return (
+        f"ขอยกเลิกคำขอลบความจำไปก่อนนะ{_soft(particle)} "
+        f"ถ้ายังอยากลบ บอกใหม่ได้ตลอด{particle}"
+    )
+
 
 def is_affirmative(text: str) -> bool | None:
     """ตอบรับ (``True``) ตอบปฏิเสธ (``False``) หรือไม่ใช่ทั้งสองอย่าง (``None``)"""
@@ -345,6 +375,11 @@ class ConversationSession:
         # คนที่ถูกเตือนไปแล้วครั้งหนึ่งว่าให้พูดว่า "ยืนยัน"
         # เตือนซ้ำไม่จบทำให้คุยเรื่องอื่นไม่ได้เลย
         self._forget_nudged: set[int] = set()
+        # ข้อความแจ้งเรื่องคำขอลบที่ต้องพูดนำหน้าคำตอบของโมเดลในเทิร์นนี้
+        #
+        # ของเดิมข้อความพวกนี้ถูกส่งคืนแทนคำตอบทั้งก้อน ผู้ใช้ที่ถามว่า
+        # "วันนี้อากาศเป็นยังไง" จึงได้ยินแต่เรื่องคำขอลบ ไม่ได้คำตอบเลย
+        self._forget_notice: str | None = None
         # เทิร์นก่อนหน้าบอทถามชื่อไปหรือเปล่า
         self._asked_for_name = False
 
@@ -441,6 +476,8 @@ class ConversationSession:
         if handled is not None:
             yield from handled
             return
+        notice = self._forget_notice
+        self._forget_notice = None
 
         # ต้องอ่านประวัติ *ก่อน* บันทึกเทิร์นล่าสุด ไม่งั้นข้อความเดียวกันจะถูกส่ง
         # ให้โมเดลสองครั้ง (ครั้งหนึ่งจากประวัติ อีกครั้งจากข้อความปัจจุบัน)
@@ -453,6 +490,14 @@ class ConversationSession:
             self.store.record_turn(speaker.id, self.session_id, "user", transcript)
 
         reply = ""
+        if notice:
+            yield SessionEvent("delta", text=notice + " ", speaker=speaker)
+            yield SessionEvent(
+                "chunk",
+                text=notice,
+                speaker=speaker,
+                speech=self._speak(notice) if speak else None,
+            )
         for event in self.brain.stream(
             transcript,
             speaker,
@@ -471,6 +516,9 @@ class ConversationSession:
             elif event.type == "done":
                 reply = event.text
 
+        if notice:
+            # คำตอบที่บันทึก/ตรวจต้องเป็นก้อนเดียวกับที่ผู้ใช้ได้ยินจริง
+            reply = f"{notice} {reply}".strip() if reply else notice
         self._note_assistant_reply(reply)
         if speaker is not None and reply:
             self.store.record_turn(speaker.id, self.session_id, "assistant", reply)
@@ -511,13 +559,26 @@ class ConversationSession:
         """จัดการคำสั่งลบความจำ คืน ``None`` ถ้าไม่ใช่คำสั่งประเภทนี้"""
         particle = self.settings.assistant_particle
 
+        self._forget_notice = None
+
         # เก็บกวาดคำขอที่หมดเวลาไปแล้วของทุกคน
         now = time.time()
-        self._pending_forget = {
-            person: asked
+        expired = {
+            person
             for person, asked in self._pending_forget.items()
-            if now - asked <= FORGET_CONFIRM_TIMEOUT
+            if now - asked > FORGET_CONFIRM_TIMEOUT
         }
+        for person in expired:
+            del self._pending_forget[person]
+            self._forget_nudged.discard(person)
+        # คำสั่งสุดท้ายที่ผู้ใช้ได้ยินคือ 'พูดว่า "ยืนยัน" ได้เลย' การปล่อยให้
+        # คำขอหมดอายุเงียบ ๆ ทำให้เขาพูดตามแล้วไม่มีอะไรเกิดขึ้น ต้องบอก
+        # แต่บอกเฉพาะเจ้าของคำขอ — คำขอของคนอื่นไม่ใช่เรื่องของคนที่พูดอยู่
+        expired_notice = (
+            _forget_expired_notice(particle)
+            if speaker is not None and speaker.id in expired
+            else None
+        )
 
         # คนที่กำลังพูดมีคำขอค้างอยู่ไหม — คำขอของคนอื่นต้องไม่ถูกแตะ
         if speaker is not None and speaker.id in self._pending_forget:
@@ -558,24 +619,23 @@ class ConversationSession:
                 # ต้องบอกให้รู้ว่าคำขอนั้นหมดอายุแล้ว
                 del self._pending_forget[speaker.id]
                 self._forget_nudged.discard(speaker.id)
-                return self._say(
-                    f"ขอยกเลิกคำขอลบความจำไปก่อนนะ{_soft(particle)} "
-                    f"ถ้ายังอยากลบ บอกใหม่ได้ตลอด{particle}",
-                    speaker,
-                    speak,
-                    user_text=transcript,
+                self._forget_notice = _forget_expired_notice(particle)
+            else:
+                self._forget_nudged.add(speaker.id)
+                self._pending_forget[speaker.id] = time.time()
+                self._forget_notice = (
+                    f"ยังไม่ได้ลบอะไรนะ{_soft(particle)} ถ้าจะลบจริง ๆ "
+                    f'พูดว่า "ยืนยัน" ได้เลย{particle}'
                 )
-            self._forget_nudged.add(speaker.id)
-            self._pending_forget[speaker.id] = time.time()
-            return self._say(
-                f'ยังไม่ได้ลบอะไรนะ{_soft(particle)} ถ้าจะลบจริง ๆ พูดว่า "ยืนยัน" '
-                f"ได้เลย{particle}",
-                speaker,
-                speak,
-                user_text=transcript,
-            )
+            # ประโยคที่ตอบไม่ชัดมักเป็นคำถามคนละเรื่อง ต้องตอบให้เขาด้วย
+            # ไม่ใช่กลืนคำถามทิ้งแล้วพูดแต่เรื่องคำขอลบ
+            return None
 
-        return self._new_forget_request(transcript, speaker, speak)
+        handled = self._new_forget_request(transcript, speaker, speak)
+        if handled is None:
+            # เทิร์นนี้ตกไปถึงโมเดล จึงยังมีที่ให้พ่วงข้อความแจ้งหมดอายุ
+            self._forget_notice = expired_notice
+        return handled
 
     def _new_forget_request(
         self, transcript: str, speaker: Speaker | None, speak: bool
@@ -642,7 +702,8 @@ class ConversationSession:
 
     def _note_assistant_reply(self, reply: str) -> None:
         """จำไว้ว่าเทิร์นนี้บอทถามชื่อหรือเปล่า เพื่อใช้ตีความคำตอบเทิร์นถัดไป"""
-        self._asked_for_name = bool(reply) and bool(_ASKED_FOR_NAME.search(reply))
+        pattern = _asked_for_name_re_cached(self.settings.assistant_name)
+        self._asked_for_name = bool(reply) and bool(pattern.search(reply))
 
     def _speak(self, text: str) -> Speech | None:
         if self.tts is None or not text.strip():

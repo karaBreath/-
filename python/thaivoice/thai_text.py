@@ -722,19 +722,24 @@ def expand_numbers_for_speech(text: str) -> str:
             f"{_speak_decimal(match.group(1))}ถึง"
             f"{_speak_decimal(match.group(2))}"
         )
-        # หน่วยที่ตามหลังพิสูจน์ว่าเป็นช่วงปริมาณ ไม่ใช่ช่วงเวลา
-        if _QUANTITY_UNIT.match(text[match.end() :]):
+        # "น." ที่ติดมาท้ายช่วงคือหลักฐานชิ้นเดียวที่กำกวมไม่ได้ ต้องเช็คก่อน
+        # หน่วยที่ตามหลัง ไม่งั้น "ทำงาน 8.00-17.00 น. ชั่วโมงพัก..." จะเห็น
+        # "ชั่วโมง" แล้วอ่านเป็นทศนิยม ทั้งยังกลืน "น." หายไปด้วย เพราะ
+        # regex กินมันเข้ามาในแมตช์แล้ว
+        marker = match.group(3) or ""
+        if not marker and _QUANTITY_UNIT.match(text[match.end() :]):
+            # หน่วยที่ตามหลังพิสูจน์ว่าเป็นช่วงปริมาณ ไม่ใช่ช่วงเวลา
             return as_range
         window = text[max(0, match.start() - 24) : match.start()]
         is_time = (
             ":" in match.group(0)
-            or match.group(3)
+            or marker
             or _TIME_RANGE_CONTEXT.search(window)
         )
         if not is_time:
             # ไม่ใช่เวลาก็ยังเป็น "ช่วง" อยู่ดี ปล่อยขีดกลางไว้ TTS จะกลืนหาย
             # แล้วความหมายของช่วงหายไปทั้งหมด
-            return as_range
+            return as_range + marker
         first, second = (re.split(r"[.:]", g) for g in match.groups()[:2])
         return (
             f"{_speak_time(first[0], first[1])}ถึง"

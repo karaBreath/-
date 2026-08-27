@@ -9,8 +9,10 @@ from conftest import FakeAnthropic, FakeEmbedder
 from thaivoice.brain import ThaiBrain
 from thaivoice.memory import MemoryStore
 from thaivoice.session import (
+    FORGET_CONFIRM_TIMEOUT,
     ConversationSession,
     _address,
+    _asked_for_name_re,
     _removed_summary,
     detect_forget_all,
     is_affirmative,
@@ -613,3 +615,90 @@ class Testคำขอลบที่หมดอายุ:
         assert "ยกเลิก" in lapsed.reply, lapsed.reply
         assert session._pending_forget == {}
         assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
+
+
+class Testแจ้งเรื่องคำขอลบต้องไม่กลืนคำถาม:
+    """ข้อความแจ้งเรื่องคำขอลบต้อง *เพิ่มเข้าไป* ไม่ใช่แทนคำตอบ
+
+    ของเดิมผู้ใช้ที่ถามว่า "วันนี้อากาศเป็นยังไง" ระหว่างมีคำขอลบค้างอยู่
+    จะได้ยินแต่เรื่องคำขอลบ คำถามหายไปเฉย ๆ
+    """
+
+    def test_ตอบไม่ชัดครั้งแรกต้องได้ทั้งคำเตือนและคำตอบ(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+
+        answer = session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+
+        assert "ยังไม่ได้ลบ" in answer.reply, answer.reply
+        assert session.brain.client.calls, "คำถามต้องถูกส่งให้โมเดล"
+        model_reply = session.brain.client.calls[-1]
+        assert model_reply is not None
+        # คำตอบต้องยาวกว่าคำเตือนล้วน ๆ แปลว่ามีคำตอบของโมเดลต่อท้ายจริง
+        assert answer.reply.strip() != (
+            'ยังไม่ได้ลบอะไรนะคะ ถ้าจะลบจริง ๆ พูดว่า "ยืนยัน" ได้เลยค่ะ'
+        ), answer.reply
+
+    def test_ตอบไม่ชัดครั้งที่สองต้องได้ทั้งคำยกเลิกและคำตอบ(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+
+        before = len(session.brain.client.calls)
+        answer = session.exchange("แล้วพรุ่งนี้ล่ะ", speaker=speaker, speak=False)
+
+        assert "ยกเลิก" in answer.reply, answer.reply
+        assert len(session.brain.client.calls) > before, "คำถามต้องถูกส่งให้โมเดล"
+        assert store.facts_for(speaker.id), "ไม่ยืนยันก็ต้องไม่ลบ"
+
+    def test_คำขอที่หมดเวลาต้องไม่หายไปเงียบ_ๆ(self, session, store):
+        """ผู้ใช้ถูกบอกให้พูดว่า "ยืนยัน" ปล่อยให้หมดอายุเงียบ ๆ ไม่ได้"""
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session._pending_forget[speaker.id] -= FORGET_CONFIRM_TIMEOUT + 1
+
+        answer = session.exchange("ยืนยัน", speaker=speaker, speak=False)
+
+        assert "ยกเลิก" in answer.reply, answer.reply
+        assert store.facts_for(speaker.id), "คำขอหมดอายุแล้วต้องไม่ลบ"
+
+    def test_คำขอของคนอื่นที่หมดเวลาต้องไม่ถูกแจ้งกับคนที่พูดอยู่(self, session, store):
+        เดช = session.register_speaker("เดช")
+        มาลี = session.register_speaker("มาลี")
+        session.exchange("ลบความจำทั้งหมด", speaker=เดช, speak=False)
+        session._pending_forget[เดช.id] -= FORGET_CONFIRM_TIMEOUT + 1
+
+        answer = session.exchange("สวัสดี", speaker=มาลี, speak=False)
+
+        assert "ยกเลิก" not in answer.reply, answer.reply
+
+
+class Testบอทเรียกตัวเองด้วยชื่อตัวเอง:
+    """prompt สั่งให้บอทเรียกตัวเองว่า "ใจ" — ชื่อนำหน้าต้องไม่บังการถามชื่อ"""
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "ใจขอทราบชื่อหน่อยได้ไหมคะ",
+            "ใจยังไม่ทราบชื่อคุณเลยค่ะ",
+            "สวัสดีค่ะ ใจขอทราบชื่อหน่อยได้ไหมคะ",
+        ],
+    )
+    def test_ต้องรู้ว่าเพิ่งถามชื่อไป(self, reply):
+        assert _asked_for_name_re("ใจ").search(reply), reply
+
+    @pytest.mark.parametrize(
+        "reply",
+        ["ผมยังไม่ทราบชื่อร้านนั้นครับ", "หมาคุณชื่ออะไรคะ", "เดชขอทราบชื่อหน่อยได้ไหมคะ"],
+    )
+    def test_ชื่ออื่นต้องไม่ถูกนับว่าเป็นการถามชื่อ(self, reply):
+        assert not _asked_for_name_re("ใจ").search(reply), reply
+
+    def test_เซสชันใช้ชื่อจากการตั้งค่าจริง(self, session):
+        session._note_assistant_reply("ใจขอทราบชื่อหน่อยได้ไหมคะ")
+        assert session._asked_for_name
+        session._note_assistant_reply("วันนี้อากาศดีค่ะ")
+        assert not session._asked_for_name
