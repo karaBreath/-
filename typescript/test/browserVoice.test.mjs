@@ -1179,6 +1179,35 @@ describe("VoiceConversation — บัคที่เจอจากการต
     talk.stop();
   });
 
+  test("พูดแทรกหลังชิ้นเสียงเล่นจบแล้วต้องยังขัดได้", async () => {
+    // คิวเสียงว่างชั่วคราวกลางเทิร์นเป็นพฤติกรรมปกติของเซิร์ฟเวอร์ (มันสังเคราะห์
+    // ประโยคถัดไปหลังส่งประโยคก่อนหน้าไปแล้ว) ถ้า interrupt() ดูแค่ว่าคิวว่างไหม
+    // การพูดแทรกตรงจังหวะนั้นจะไม่ติด บอทพูดต่อจนจบและผู้ใช้ไม่เห็นข้อความเลย
+    const replies = [];
+    const { talk } = await started({
+      bargeIn: true,
+      onReply: (t) => replies.push(t),
+    });
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitFinal("ลืมทุกอย่างเกี่ยวกับฉัน");
+    await sleep(30);
+
+    FakeWebSocket.instances[0].emit({
+      type: "chunk",
+      text: "ขอยืนยันก่อนค่ะ จะลบความจำทั้งหมด",
+      audio: "QUFB",
+    });
+    // รอให้ชิ้นเสียงเล่นจบก่อน — คิวว่าง แต่เทิร์นยังไม่จบ
+    await sleep(60);
+    assert.equal(talk.audio.busy, false, "ชิ้นเสียงต้องเล่นจบแล้ว");
+
+    talk.interrupt();
+    await sleep(20);
+
+    assert.deepEqual(replies, ["ขอยืนยันก่อนค่ะ จะลบความจำทั้งหมด"]);
+    talk.stop();
+  });
+
   test("ตัวจัดการที่โยนตอนเปลี่ยนสถานะต้องไม่ทำให้เทิร์นค้าง", async () => {
     let พังแล้ว = false;
     const rejections = [];

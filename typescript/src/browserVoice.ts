@@ -527,7 +527,14 @@ interface PendingTurn {
    * ไม่มี delta เลย ``reply`` จึงว่างตลอดทั้งเทิร์น ถ้าผู้ใช้พูดแทรกตอนนั้น
    * เขาจะไม่เห็นข้อความอะไรเลยสักอย่าง
    */
-  spoken?: string;
+  /** ทุกชิ้นที่ *มาถึง* แล้ว
+   *
+   * ตั้งใจไม่แยกเป็น "ชิ้นที่เล่นจบจริง" — เซิร์ฟเวอร์บันทึกคำตอบเต็มไว้เสมอ
+   * การให้ไคลเอนต์รายงานแค่ส่วนที่ผู้ใช้ได้ยินจะทำให้บันทึกสองฝั่งไม่ตรงกัน
+   * ซึ่งแย่กว่าการเห็นข้อความที่ยังพูดไม่จบ ถ้าจะแก้ต้องแก้ที่ฝั่งเซิร์ฟเวอร์
+   * ให้บันทึกเฉพาะส่วนที่ส่งไปถึงจริงด้วย ไม่ใช่แก้ข้างเดียว
+   */
+  received?: string;
   /**
    * socket ที่ส่งเทิร์นนี้ออกไป
    *
@@ -810,7 +817,7 @@ export class VoiceConversation {
     // "...หรือเปล่าคะ" ที่พูดต่อท้ายคำถามเดิม จึงทิ้งคำตอบทั้งอันโดยที่ผู้ใช้
     // ไม่ได้อะไรกลับมาเลย ไม่มีข้อความ ไม่มีเสียง ไม่มี error
     const producing = this.pending.some(
-      (turn) => !turn.abandoned && (turn.reply || turn.spoken),
+      (turn) => !turn.abandoned && (turn.reply || turn.received),
     );
     if (!this.audio.busy && !this.synth.busy && !producing) return;
     this.audio.stop();
@@ -822,8 +829,8 @@ export class VoiceConversation {
       // ข้อความที่ระบบเขียนเอง (คำถามยืนยันการลบ คำปฏิเสธ) ส่งมาเป็น chunk
       // ตรง ๆ ไม่มี delta เลย turn.reply จึงว่าง ถ้ายกเลิกโดยไม่เก็บข้อความ
       // จากชิ้นเสียงที่ได้มาแล้ว ผู้ใช้จะไม่เห็นอะไรเลยสักอย่าง
-      if (!interrupted.reply && interrupted.spoken) {
-        interrupted.reply = interrupted.spoken;
+      if (!interrupted.reply && interrupted.received) {
+        interrupted.reply = interrupted.received;
       }
       interrupted.abandoned = true;
       // onReply ของผู้เรียกโยนได้ — ถ้าไม่ครอบ เทิร์นที่เหลือจะไม่ถูกรับกลับ
@@ -977,7 +984,7 @@ export class VoiceConversation {
     if (!text.trim()) return;
 
     const turn = ++this.turnId;
-    this.pending.push({ id: turn, reply: "", spoken: "", abandoned: false });
+    this.pending.push({ id: turn, reply: "", received: "", abandoned: false });
     this.audio.accept(turn);
     this.synth.accept(turn);
 
@@ -1206,7 +1213,7 @@ export class VoiceConversation {
         this.options.onReplyDelta?.(text);
         break;
       case "chunk":
-        turn.spoken = (turn.spoken ?? "") + text;
+        turn.received = (turn.received ?? "") + text;
         this.setState("speaking");
         if (event.audio) this.audio.push(turn.id, event.audio, event.mime ?? "audio/mpeg");
         else this.synth.speak(turn.id, text);
