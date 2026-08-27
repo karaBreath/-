@@ -478,7 +478,12 @@ class MemoryStore:
         """ลบคนนี้พร้อมความจำทั้งหมด (สิทธิ์ที่จะถูกลืม)"""
         with self._lock:
             cur = self._conn.execute("DELETE FROM speakers WHERE id = ?", (speaker_id,))
-            self._bump_memory_epoch(speaker_id)
+            # เลื่อนรุ่นเฉพาะเมื่อลบได้จริง ไม่งั้นคำขอลบ id ที่ไม่มีอยู่จะ
+            # สร้างรายการใหม่ในตารางรุ่นทุกครั้ง และไม่มีอะไรมาเก็บกวาดเลย
+            if cur.rowcount > 0:
+                self._bump_memory_epoch(speaker_id)
+            else:
+                self._memory_epoch.pop(speaker_id, None)
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -674,6 +679,9 @@ class MemoryStore:
             cur = self._conn.execute(
                 "DELETE FROM facts WHERE speaker_id = ?", (speaker_id,)
             )
+            # เส้นทางลบทุกเส้นต้องเลื่อนรุ่นความจำ ไม่งั้นงานสกัดที่ค้างอยู่จะ
+            # เขียนข้อเท็จจริงกลับเข้าไปหลัง API รายงานว่าลบแล้ว
+            self._bump_memory_epoch(speaker_id)
             self._conn.commit()
             return cur.rowcount
 

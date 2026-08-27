@@ -282,3 +282,21 @@ class Testชื่อว่างตอนเปลี่ยนชื่อ:
         updated = store.update_speaker(speaker.id, display_name="  สมชาย  ")
         assert updated is not None and updated.display_name == "สมชาย"
         assert store.find_speaker_by_name("สมชาย").id == speaker.id
+
+
+class Testตารางรุ่นความจำ:
+    """โตไม่หยุดได้ถ้าเลื่อนรุ่นทุกครั้งที่มีคำขอลบ แม้ id นั้นจะไม่มีอยู่จริง
+
+    DELETE /api/speakers/{id} ไม่ต้องยืนยันตัวตน จึงเป็นตัวป้อนที่ดี
+    """
+
+    def test_ลบ_id_ที่ไม่มีอยู่ต้องไม่สร้างรายการใหม่(self, store):
+        for bogus in range(1000, 1200):
+            assert store.delete_speaker(bogus) is False
+        assert store._memory_epoch == {}
+
+    def test_ลบคนที่มีอยู่จริงยังเลื่อนรุ่น(self, store):
+        speaker = store.create_speaker("เดช")
+        before = store.memory_epoch(speaker.id)
+        assert store.delete_speaker(speaker.id) is True
+        assert store.memory_epoch(speaker.id) > before

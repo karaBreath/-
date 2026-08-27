@@ -260,3 +260,48 @@ class Testความจำที่ถูกลบต้องไม่ฟื�
         extractor.shutdown(wait=True)
 
         assert [(f.key, f.value) for f in store.facts_for(speaker.id)] == [("อาชีพ", "หมอ")]
+
+    def test_ลบเฉพาะข้อเท็จจริงระหว่างสกัดก็ต้องทิ้งผล(self, store, settings):
+        """forget_all_facts เป็นเส้นทางลบที่สาม ซึ่งตัวแก้รอบหกไม่ได้ครอบ
+
+        เรียกได้จาก DELETE /api/speakers/{id}/facts
+        """
+        import threading
+
+        speaker = store.create_speaker("เดช")
+        store.record_turn(speaker.id, "s", "user", "ผมเป็นหมอครับ")
+        turns = store.recent_turns(speaker.id)
+
+        เริ่มแล้ว = threading.Event()
+        ลบเสร็จ = threading.Event()
+        client = FakeAnthropic()
+        client.parsed_outputs = [
+            MemoryUpdate(
+                facts=[
+                    ExtractedFact(
+                        key="อาชีพ", value="หมอ", category="งาน", confidence=0.9
+                    )
+                ],
+                forget_keys=[],
+                display_name="",
+                nickname="",
+                gender="unknown",
+            )
+        ]
+        extractor = MemoryExtractor(store, client, settings)
+        original = extractor._call_model
+
+        def slow(prompt):
+            เริ่มแล้ว.set()
+            ลบเสร็จ.wait(timeout=5)
+            return original(prompt)
+
+        extractor._call_model = slow
+        extractor.schedule(speaker, turns)
+
+        assert เริ่มแล้ว.wait(timeout=5)
+        store.forget_all_facts(speaker.id)
+        ลบเสร็จ.set()
+        extractor.shutdown(wait=True)
+
+        assert store.facts_for(speaker.id) == [], "ข้อเท็จจริงฟื้นคืนมาหลังลบ"
