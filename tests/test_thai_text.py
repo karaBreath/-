@@ -1602,3 +1602,88 @@ class Testสกอร์ที่ใช้คำว่าอยู่ที่:
     def test_ช่วงจริงต้องยังอ่านว่าถึง(self, text):
         got = clean_for_speech(text)
         assert "ถึง" in got and "ต่อ" not in got, got
+
+
+class Testวันที่ที่เป็นไปไม่ได้ต้องไม่ถูกอ่านเป็นวันที่:
+    @pytest.mark.parametrize("text", ["15/13/68", "32/8/68", "0/8/68", "15/0/68"])
+    def test_เดือนหรือวันเกินช่วงต้องตกไปเป็นทับ(self, text):
+        got = clean_for_speech(text)
+        assert "ทับ" in got, got
+
+    @pytest.mark.parametrize("text", ["15/8/68", "1/1/70", "31/12/99"])
+    def test_วันที่ที่เป็นไปได้ต้องอ่านเป็นวันเดือนปี(self, text):
+        got = clean_for_speech(text)
+        assert "ทับ" not in got, got
+
+
+class Testที่ในฐานะลักษณนาม:
+    """"ที่" ลงท้ายคำนามไทยเยอะ แต่ข้อบังคับเรื่องจำนวนนำหน้าแยกได้แล้ว"""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [("นั่งได้ 20 ที่/คัน", "ยี่สิบ ที่ ต่อ คัน"), ("มี 4 ที่/โต๊ะ", "สี่ ที่ ต่อ โต๊ะ")],
+    )
+    def test_มีจำนวนนำหน้าต้องอ่านว่าต่อ(self, text, expected):
+        got = clean_for_speech(text)
+        assert expected in got and "/" not in got, got
+
+    @pytest.mark.parametrize(
+        "text", ["ระบุสถานที่/เวลานัดหมาย", "เลือกที่/วันที่สะดวก"]
+    )
+    def test_ไม่มีจำนวนต้องไม่อ่านว่าต่อ(self, text):
+        assert "ต่อ" not in clean_for_speech(text), clean_for_speech(text)
+
+
+class Testเส้นทางที่ใช้ตัวตัดคำของ_pythainlp:
+    """เส้นทางนี้ไม่เคยถูกรันในชุดทดสอบเลย เพราะ pythainlp ไม่ได้ติดตั้ง
+
+    แต่มันทำงานจริงในเครื่องที่ติดตั้งไว้ ต้องยิงด้วยของปลอมอย่างน้อยหนึ่งครั้ง
+    ไม่งั้นโค้ดที่ผู้ใช้จริงรันอยู่ไม่เคยถูกทดสอบเลย
+    """
+
+    @pytest.fixture
+    def ตัวตัดคำปลอม(self, monkeypatch):
+        import sys
+        import types
+
+        import thaivoice.thai_text as tt
+
+        def word_tokenize(text):
+            """ตัดทุก 5 ตัวอักษร — พอให้เห็นว่าเส้นทางนี้ถูกใช้จริง"""
+            return [text[i : i + 5] for i in range(0, len(text), 5)]
+
+        pythainlp = types.ModuleType("pythainlp")
+        tokenize = types.ModuleType("pythainlp.tokenize")
+        tokenize.word_tokenize = word_tokenize
+        pythainlp.tokenize = tokenize
+        monkeypatch.setitem(sys.modules, "pythainlp", pythainlp)
+        monkeypatch.setitem(sys.modules, "pythainlp.tokenize", tokenize)
+        monkeypatch.setattr(tt, "_word_tokenizer_ok", True)
+        yield
+        monkeypatch.setattr(tt, "_word_tokenizer_ok", None)
+
+    def test_เส้นทางนี้ถูกใช้จริง(self, ตัวตัดคำปลอม):
+        from thaivoice.thai_text import thai_word_tokenizer_available
+
+        assert thai_word_tokenizer_available()
+
+    def test_ตัวเลขต้องไม่ถูกตัดครึ่งในเส้นทางนี้ด้วย(self, ตัวตัดคำปลอม):
+        """ตัวตัดคำปลอมตัดทุก 5 ตัวอักษร ซึ่งตกกลางตัวเลขแน่นอน"""
+        # วางตัวเลขให้คร่อมเพดาน 160 ตัวอักษรพอดี จุดตัดที่ตัวตัดคำเสนอ
+        # (ทุก 5 ตัวอักษร) จึงตกกลางตัวเลขแน่นอน
+        text = "ก" * 156 + "3,099,400" + "ก" * 60
+        chunker = SpeechChunker()
+        out: list[str] = []
+        for ch in text:
+            out.extend(chunker.feed(ch))
+        out.extend(chunker.flush())
+
+        assert "".join(out) == text
+        joined = "".join(out)
+        pos = 0
+        for chunk in out[:-1]:
+            pos += len(chunk)
+            ก่อน, หลัง = joined[pos - 1], joined[pos]
+            assert not (
+                ก่อน in "0123456789,." and หลัง in "0123456789,."
+            ), f"ตัดกลางตัวเลขที่ {joined[pos - 8 : pos + 4]!r}"
