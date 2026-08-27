@@ -616,3 +616,60 @@ class Testการปิดเซิร์ฟเวอร์:
         runtime = ServerRuntime(settings, client=fake_client)
         runtime.close()
         runtime.close()
+
+
+class Testปิดเซิร์ฟเวอร์ระหว่างที่ยังมีคนคุยอยู่:
+    def test_เชื่อมต่อค้างอยู่แล้วเซิร์ฟเวอร์ปิดต้องได้ข้อความภาษาไทย(
+        self, client, runtime
+    ):
+        """เช็ค closed เฉพาะตอนรับการเชื่อมต่อไม่พอ
+
+        การเชื่อมต่อที่เปิดค้างอยู่ก่อน close() ยังส่งเทิร์นเข้ามาได้ แล้วเจอ
+        "cannot schedule new futures after shutdown" ดิบ ๆ เป็นภาษาอังกฤษ
+        """
+        with client.websocket_connect("/ws/chat?session_id=ปิด1") as socket:
+            socket.send_json({"text": "สวัสดีครับ", "speak": False})
+            while socket.receive_json()["type"] != "done":
+                pass
+
+            runtime.closed = True
+            socket.send_json({"text": "ยังอยู่ไหม", "speak": False})
+            event = socket.receive_json()
+
+        assert event["type"] == "error", event
+        assert "ปิดตัว" in event["text"], event
+
+    def test_งบเวลาปิดต้องแยกกันคนละก้อน(self, settings, fake_client, tts):
+        """งานสกัดที่กินเวลาจนหมด deadline ต้องไม่ทำให้เทิร์นที่คุยอยู่ถูกตัด
+
+        ของเดิมแบ่งงบต่อคิวจาก deadline เดียว pool ที่สองจึงได้ join(0)
+        แล้ว store.close() ไปทับเทิร์นที่ยังเขียนอยู่
+        """
+        import time as _time
+
+        runtime = server_module.ServerRuntime(settings, client=fake_client, tts=tts)
+        speaker = runtime.store.create_speaker("เดช")
+        ผลการเขียน: list[str] = []
+
+        class งานสกัดที่ค้างนาน:
+            def shutdown(self, wait: bool = True) -> None:
+                _time.sleep(0.5)
+
+        class เทิร์นที่กำลังเขียน:
+            """จำลองเทิร์นที่ผู้ใช้ได้ยินคำตอบไปแล้วแต่ยังบันทึกไม่เสร็จ"""
+
+            def shutdown(self, wait: bool = True) -> None:
+                _time.sleep(0.1)
+                try:
+                    runtime.store.record_turn(speaker.id, "s", "assistant", "คำตอบ")
+                    ผลการเขียน.append("บันทึกได้")
+                except Exception as err:  # ฐานข้อมูลถูกปิดไปก่อน
+                    ผลการเขียน.append(type(err).__name__)
+
+        runtime.extractor = งานสกัดที่ค้างนาน()
+        runtime.stream_executor = เทิร์นที่กำลังเขียน()
+        runtime.close(timeout=0.3)
+
+        # ของเดิมแบ่งงบต่อคิว งานสกัดกิน 0.3 วินาทีจนหมด เทิร์นที่กำลังเขียน
+        # จึงได้ join(0) แล้ว store.close() ไปทับมันกลางคัน
+        assert ผลการเขียน == ["บันทึกได้"], ผลการเขียน

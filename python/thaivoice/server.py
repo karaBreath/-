@@ -182,10 +182,16 @@ class ServerRuntime:
         with self._lock:
             self.closed = True
             self._sessions.clear()
-        deadline = time.monotonic() + timeout
+        # ปิดเทิร์นที่กำลังคุยอยู่ *ก่อน* งานสกัดเบื้องหลัง — คนที่รอฟังคำตอบอยู่
+        # สำคัญกว่าความจำที่สกัดค้าง และให้งบเวลาแยกกันคนละก้อน
+        #
+        # ของเดิมแบ่งงบแบบต่อคิวจาก deadline เดียว ถ้างานสกัดกินจนหมดเวลา
+        # stream_executor จะได้ join(0) คืนทันที แล้ว store.close() ไปทับเทิร์น
+        # ที่ยังเขียนอยู่ — "Cannot operate on a closed database" ซึ่งถูกกลืนทิ้ง
+        # ผู้ใช้ได้ยินคำตอบไปแล้วแต่บทสนทนาไม่ถูกบันทึก
+        _join(self.stream_executor.shutdown, timeout)
         if self.extractor is not None:
-            _join(self.extractor.shutdown, max(0.0, deadline - time.monotonic()))
-        _join(self.stream_executor.shutdown, max(0.0, deadline - time.monotonic()))
+            _join(self.extractor.shutdown, timeout)
         self.store.close()
 
 
@@ -590,6 +596,13 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
                     break
                 if frame.get("type") == "websocket.disconnect":
                     break
+                # เช็คซ้ำทุกเฟรม ไม่ใช่แค่ตอนรับการเชื่อมต่อ — การเชื่อมต่อที่เปิด
+                # ค้างอยู่ก่อน close() จะยังส่งเทิร์นเข้ามาได้เรื่อย ๆ แล้วเจอ
+                # "cannot schedule new futures after shutdown" ดิบ ๆ เป็นภาษาอังกฤษ
+                if runtime.closed:
+                    await fail("เซิร์ฟเวอร์กำลังปิดตัว ลองใหม่อีกครั้งในอีกสักครู่")
+                    await websocket.close(code=1013, reason="เซิร์ฟเวอร์กำลังปิดตัว")
+                    return
                 if frame.get("text") is None:
                     await fail("รองรับเฉพาะข้อความ JSON ไม่รองรับเฟรมไบนารี")
                     continue
