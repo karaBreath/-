@@ -164,6 +164,10 @@ _PER_UNITS = (
     "เปอร์เซ็นต์", "%", "องศา", "ขวด", "กล่อง", "ถุง", "แผ่น",
     # หน่วยละตินต้องอยู่ด้วย — รอบแรกทำงานก่อนการขยายตัวย่อละติน
     "mAh", "mg", "ml", "mL", "kg", "km", "cm", "kWh",
+    # ชื่อเต็มของหน่วยไทยต้องอยู่ด้วย เพราะกฎนี้รันอีกรอบ *หลัง* ตัวย่อถูกขยาย
+    # ไม่งั้น "12 ลบ.ม./ชั่วโมง" ที่กลายเป็น "ลูกบาศก์เมตร/ชั่วโมง" แล้วจะไม่มี
+    # กฎไหนรู้จัก เหลือ "/" ดิบ ๆ ให้ TTS
+    *sorted(set(_THAI_UNIT_ABBR.values())),
 )
 # ต้องมี *จำนวน* กำกับอยู่ก่อนหน้าหน่วย
 #
@@ -259,6 +263,10 @@ def clean_for_speech(text: str, expand_numbers: bool = True) -> str:
     # และมี "ชม." แต่ไม่มี mAh พอ "บ." ถูกแปลงเป็น "บาท" ทีหลัง กฎก็ผ่านไปแล้ว
     # "38.50 บ./ลิตร" จึงเหลือ "/" ดิบ ๆ ให้ TTS แล้ว "ต่อ" หายทั้งคำ
     s = _UNIT_PER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)} ต่อ ", s)
+    # ...แล้วต้องขยายตัวย่อปิดท้ายอีกรอบ เพราะหน่วยที่อยู่ *หลัง* ทับเพิ่งจะมี
+    # คำว่า "ต่อ" มานำหน้าเดี๋ยวนี้เอง ("บาท ต่อ กก." ต้องเป็น "ต่อ กิโลกรัม"
+    # ไม่งั้น TTS อ่านว่า "กอ กอ")
+    s = _THAI_UNIT_RE.sub(lambda m: f" {_THAI_UNIT_ABBR[m.group(2)]} ", s)
 
     # แปลงสัญลักษณ์ที่มีความหมายก่อน แล้วค่อยกรองสัญลักษณ์ที่เหลือทิ้ง
     for symbol, spoken in _SYMBOL_UNITS:
@@ -584,9 +592,9 @@ _SCORE_CONTEXT = re.compile(
 # "ได้คะแนนสอบระหว่าง 85-90 คะแนน" มีคำว่า "คะแนน" ก็จริง แต่ "ระหว่าง"
 # ชี้ชัดว่าเป็นช่วง การอ่านว่า "แปดสิบห้าต่อเก้าสิบ" เปลี่ยนความหมายเป็น
 # สกอร์การแข่งขันไปเลย
-_RANGE_CONTEXT = re.compile(
-    r"(?:ระหว่าง|ตั้งแต่|ประมาณ|ราว|เฉลี่ย|ราคา|อายุ|ช่วง|อยู่ที่)"
-)
+# ตั้งใจไม่ใส่ "อยู่ที่" กับ "ช่วง" — ทั้งสองคำใช้บอกสกอร์ในภาษาไทยพอ ๆ กับ
+# ใช้บอกช่วง ("สกอร์ตอนนี้อยู่ที่ 2-1" คือสองต่อหนึ่ง ไม่ใช่สองถึงหนึ่ง)
+_RANGE_CONTEXT = re.compile(r"(?:ระหว่าง|ตั้งแต่|ประมาณ|ราว|เฉลี่ย|ราคา|อายุ)")
 
 # ตัวเลขคั่นด้วยทับตั้งแต่สามตัวขึ้นไป
 _SLASH_CHAIN = re.compile(r"(?<![\w/])\d{1,5}(?:/\d{1,5}){2,}(?![\d\w/])")
@@ -732,6 +740,10 @@ def _speak_short_date(match: re.Match[str]) -> str:
     day, month = int(match.group(1)), int(match.group(2))
     if not 1 <= month <= 12 or not 1 <= day <= 31:
         return match.group(0)
+    # เลขที่บ้าน/ห้อง/ชั้น หน้าตาเหมือนวันที่ทุกประการ ("บ้านเลขที่ 12/5/45")
+    # บริบทข้างหน้าเป็นสิ่งเดียวที่แยกออก ปล่อยให้กฎเลขคั่นทับอ่านว่า "ทับ"
+    if _ADDRESS_CONTEXT.search(match.string[max(0, match.start() - 24) : match.start()]):
+        return match.group(0)
     year = " ".join(_DIGITS[int(d)] for d in match.group(3))
     return f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} {year}"
 
@@ -749,6 +761,9 @@ def _speak_iso_date(match: re.Match[str]) -> str:
 def _speak_date(match: re.Match[str]) -> str:
     day, month, year = (int(g) for g in match.groups())
     if not 1 <= month <= 12:
+        return match.group(0)
+    # เช่นเดียวกับรูปปีสองหลัก — "เลขที่ 12/5/2545" คือเลขที่ ไม่ใช่วันที่
+    if _ADDRESS_CONTEXT.search(match.string[max(0, match.start() - 24) : match.start()]):
         return match.group(0)
     return (
         f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} "
@@ -973,7 +988,15 @@ def _abbreviation_stems(abbreviations: "Iterable[str]") -> set[str]:
         parts = abbreviation.rstrip(".").split(".")
         for i in range(1, len(parts) + 1):
             stem = ".".join(parts[:i])
-            if stem:
+            # ทิ้ง stem ที่ส่วนสุดท้ายสั้นกว่าสองตัวอักษร
+            #
+            # "ก.ก." ให้ stem "ก", "ม." ให้ "ม" แล้ว head.endswith("ก") เป็นจริง
+            # กับ *ทุก* คำไทยที่ลงท้ายด้วย ก จุดจบประโยคจริงจึงหายหมด —
+            # "อากาศดีมาก." "งานเสร็จครบ." ไม่ถูกตัดอีกเลย ซึ่งทำให้ท่อนแรก
+            # ของเสียงมาช้าลง
+            # ตัวตรวจจุดจบบังคับให้มีอักขระคำสองตัวหน้าจุดอยู่แล้ว stem ยาวหนึ่ง
+            # ตัวจึงไม่มีวันมีประโยชน์
+            if stem and len(parts[i - 1]) >= 2:
                 stems.add(stem)
     return stems
 

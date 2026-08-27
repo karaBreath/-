@@ -1407,12 +1407,42 @@ class Testตัวย่อไทยต้องไม่ถูกตัดก�
         assert split_sentences(text) == [text], split_sentences(text)
         assert expected in clean_for_speech(text)
 
-    def test_รายการตัวย่อสร้างจากตารางจริง(self):
-        """ไล่พิมพ์มือแล้วรอบหน้าที่เพิ่มหน่วยใหม่จะพังซ้ำที่เดิม"""
-        from thaivoice.thai_text import _MONTH_ABBR, _THAI_ABBREVIATIONS
+    def test_ตัวย่อทุกตัวในตารางต้องไม่ถูกตัด(self):
+        """ไล่พิมพ์มือแล้วรอบหน้าที่เพิ่มหน่วยใหม่จะพังซ้ำที่เดิม
 
-        for abbreviation in _MONTH_ABBR:
-            assert abbreviation.split(".")[0] in _THAI_ABBREVIATIONS, abbreviation
+        ตรวจที่พฤติกรรมจริง ไม่ใช่ที่หน้าตาของรายการ — ตัวย่อที่มีพยัญชนะตัวเดียว
+        หน้าจุด ("ก.พ.") ไม่เคยเสี่ยงอยู่แล้ว เพราะตัวตรวจจุดจบต้องการอักขระคำ
+        สองตัวหน้าจุด
+        """
+        from thaivoice.thai_text import _MONTH_ABBR, _THAI_UNIT_ABBR
+
+        for abbreviation in list(_MONTH_ABBR) + list(_THAI_UNIT_ABBR):
+            text = f"ค่า 5 {abbreviation} ต่อไป"
+            assert split_sentences(text) == [text], abbreviation
+
+    def test_จุดจบประโยคจริงต้องยังถูกตัด(self):
+        """stem ที่ยาวตัวอักษรเดียวทำให้ทุกคำที่ลงท้ายด้วยตัวนั้นถูกนับเป็นตัวย่อ
+
+        "อากาศดีมาก." จึงไม่ถูกตัดอีกเลย ซึ่งทำให้ท่อนแรกของเสียงมาช้าลง
+        """
+        from thaivoice.thai_text import _sentence_ends
+
+        for text in ["อากาศดีมาก. พรุ่งนี้ฝนตก", "งานเสร็จครบ. ไปกันเลย"]:
+            assert list(_sentence_ends(text)), text
+
+    def test_ท่อนแรกต้องมาถึงเร็วเหมือนเดิม(self):
+        """จุดจบประโยคที่หายไปทำให้ตัวตัดท่อนต้องรอจนกว่าจะเจอเว้นวรรค"""
+        text = (
+            "ผมไปทำงานมาทั้งวันเลยครับวันนี้ประชุมสามรอบติดกันเลยรู้สึกเหนื่อยมาก. "
+            "พรุ่งนี้ตั้งใจว่าจะพักผ่อนให้เต็มที่"
+        )
+        chunker = SpeechChunker()
+        out: list[str] = []
+        for i in range(0, len(text), 4):
+            out.extend(chunker.feed(text[i : i + 4]))
+        assert out, "ต้องได้ท่อนแรกก่อนข้อความจบ"
+        # ท่อนแรกต้องจบที่จุด ไม่ใช่ไหลต่อไปจนเจอเว้นวรรคหรือชนเพดาน
+        assert out[0].rstrip().endswith("."), out[0]
 
 
 class Testทับที่แปลว่าต่อกับทับที่แปลว่าหรือ:
@@ -1511,3 +1541,64 @@ class Testความเร็วของตัวจับจำนวนเ�
         clean_for_speech("9" * 50000)
         ใช้เวลา = time.monotonic() - เริ่ม
         assert ใช้เวลา < 3.0, f"ใช้เวลา {ใช้เวลา:.1f} วินาที"
+
+
+class Testหน่วยสองฝั่งทับต้องถูกอ่านครบ:
+    """กฎ "ต่อ" กับการขยายตัวย่อสลับลำดับกันไม่ได้
+
+    หน่วยที่อยู่ *หลัง* ทับเพิ่งมีคำว่า "ต่อ" มานำหน้าตอนกฎรอบสองทำงาน
+    ถ้าไม่ขยายตัวย่อปิดท้ายอีกรอบ TTS จะอ่าน "กอ กอ" แทน "กิโลกรัม"
+    """
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ราคา 25 บ./กก.", "ยี่สิบห้า บาท ต่อ กิโลกรัม"),
+            ("ค่าส่ง 30 บ./ชม.", "สามสิบ บาท ต่อ ชั่วโมง"),
+            ("อัตรา 12 ลบ.ม./ชั่วโมง", "สิบสอง ลูกบาศก์เมตร ต่อ ชั่วโมง"),
+            ("อัตรา 12 มม./ชม.", "สิบสอง มิลลิเมตร ต่อ ชั่วโมง"),
+        ],
+    )
+    def test_ทั้งสองฝั่งต้องเป็นชื่อเต็ม(self, text, expected):
+        got = clean_for_speech(text)
+        assert expected in got and "/" not in got, got
+
+
+class Testเลขที่บ้านที่หน้าตาเหมือนวันที่:
+    @pytest.mark.parametrize(
+        "text",
+        ["บ้านเลขที่ 12/5/45", "ห้อง 3/4/12", "ที่อยู่ 9/4/76", "เลขที่ 12/5/2545"],
+    )
+    def test_บริบทที่อยู่ต้องชนะการอ่านเป็นวันที่(self, text):
+        got = clean_for_speech(text)
+        assert "ทับ" in got, got
+        assert "มกราคม" not in got and "พฤษภาคม" not in got and "เมษายน" not in got
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("นัดวันที่ 15/8/68 นะคะ", "สิงหาคม"),
+            ("วันที่ 15/8/2568", "สิงหาคม"),
+            ("ประชุม 5/4/69", "เมษายน"),
+        ],
+    )
+    def test_วันที่จริงต้องยังอ่านเป็นวันเดือนปี(self, text, expected):
+        assert expected in clean_for_speech(text)
+
+
+class Testสกอร์ที่ใช้คำว่าอยู่ที่:
+    """"อยู่ที่" กับ "ช่วง" ใช้บอกสกอร์พอ ๆ กับใช้บอกช่วง"""
+
+    @pytest.mark.parametrize(
+        "text", ["สกอร์ตอนนี้อยู่ที่ 2-1", "คะแนนตอนนี้อยู่ที่ 3-2"]
+    )
+    def test_สกอร์ต้องอ่านว่าต่อ(self, text):
+        got = clean_for_speech(text)
+        assert "ต่อ" in got and "ถึง" not in got, got
+
+    @pytest.mark.parametrize(
+        "text", ["ได้คะแนนสอบระหว่าง 85-90 คะแนน", "คะแนนเฉลี่ย 70-80"]
+    )
+    def test_ช่วงจริงต้องยังอ่านว่าถึง(self, text):
+        got = clean_for_speech(text)
+        assert "ถึง" in got and "ต่อ" not in got, got
