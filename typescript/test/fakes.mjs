@@ -146,8 +146,14 @@ export class FakeWebSocket {
     this.sent.push(JSON.parse(data));
   }
 
-  /** จำลองเหตุการณ์ที่เซิร์ฟเวอร์ส่งกลับมา */
+  /**
+   * จำลองเหตุการณ์ที่เซิร์ฟเวอร์ส่งกลับมา
+   *
+   * socket ที่ปิดแล้วไม่ส่งข้อความต่ออีก — เบราว์เซอร์จริงเป็นแบบนั้น
+   * ของปลอมที่ยังส่งต่อใจดีเกินไป และซ่อนผลของการไม่ปิด socket ไว้
+   */
   emit(event) {
+    if (this.readyState === 3) return;
     this._fire("message", { data: JSON.stringify(event) });
   }
 

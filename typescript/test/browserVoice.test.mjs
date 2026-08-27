@@ -1089,3 +1089,145 @@ describe("VoiceConversation — บัคที่เจอจากการต
     talk.stop();
   });
 });
+
+describe("VoiceConversation — บัคที่เจอจากการตรวจรอบเจ็ด", () => {
+  const client = () => new ThaiVoiceClient({ baseUrl: "http://x", sessionId: "t" });
+
+  async function started(options = {}) {
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      ...options,
+    });
+    await talk.start();
+    return { talk, recognition: FakeSpeechRecognition.instances.at(-1) };
+  }
+
+  test("กดหยุดแล้วเริ่มใหม่ทันทีต้องรื้อของเก่าให้หมดจริง", async () => {
+    // ยามที่ใส่ไว้รอบหกข้ามการรื้อทั้งก้อน: บอทพูดต่อจนจบทั้งที่กดหยุดแล้ว
+    // และ socket เก่าไม่ถูกปิด แล้วบทสนทนาใหม่ก็ใช้มันต่อ
+    const replies = [];
+    const { talk, recognition } = await started({ onReply: (t) => replies.push(t) });
+    recognition.emitFinal("สวัสดี");
+    await sleep(30);
+
+    const เก่า = FakeWebSocket.instances[0];
+    เก่า.emit({ type: "chunk", text: "หนึ่ง", audio: "QUFB" });
+    เก่า.emit({ type: "chunk", text: "สอง", audio: "QkJC" });
+
+    talk.stop();
+    await talk.start();
+    await sleep(120);
+
+    assert.equal(เก่า.readyState, 3, "socket เก่าต้องถูกปิด");
+    assert.ok(FakeAudio.played.length <= 1, `เล่นเสียงต่อหลังกดหยุด: ${FakeAudio.played}`);
+
+    const ใหม่ = FakeSpeechRecognition.instances.at(-1);
+    ใหม่.emitFinal("ประโยคใหม่");
+    await sleep(40);
+    เก่า.emit({ type: "done", text: "คำตอบของบทสนทนาที่หยุดไปแล้ว" });
+    await sleep(40);
+
+    assert.ok(
+      !replies.includes("คำตอบของบทสนทนาที่หยุดไปแล้ว"),
+      `คำตอบของบทสนทนาเก่าไปโผล่ในบทสนทนาใหม่: ${replies}`,
+    );
+    talk.stop();
+  });
+
+  test("คำขอโหมดกดพูดที่ล้มหลังกดหยุดต้องไม่ดึงสถานะกลับมา", async () => {
+    let ปล่อย;
+    const { talk } = await started();
+    talk.client.voice = () =>
+      new Promise((_, reject) => {
+        ปล่อย = () => reject(new Error("เครือข่ายหลุด"));
+      });
+    talk.recorder = { take: () => new Blob(["x"]), reset() {}, stop: async () => null };
+
+    const รอ = talk.pushToTalkStop();
+    await sleep(10);
+    talk.stop();
+    await sleep(10);
+    ปล่อย();
+    await รอ;
+    await sleep(20);
+
+    assert.equal(talk.currentState, "idle", "บทสนทนาปิดแล้ว ต้องไม่กลับไป 'กำลังฟัง'");
+  });
+
+  test("พูดแทรกข้อความระบบที่ไม่มี delta ต้องไม่ทำให้ข้อความหายไปเลย", async () => {
+    // ข้อความยืนยันการลบส่งมาเป็น chunk ตรง ๆ ไม่มี delta เลย
+    const replies = [];
+    const { talk, recognition } = await started({
+      bargeIn: true,
+      onReply: (t) => replies.push(t),
+    });
+    recognition.emitFinal("ลืมทุกอย่างเกี่ยวกับฉัน");
+    await sleep(30);
+
+    FakeWebSocket.instances[0].emit({
+      type: "chunk",
+      text: "ขอยืนยันก่อนค่ะ จะลบความจำทั้งหมด",
+      audio: "QUFB",
+    });
+    await sleep(10);
+    talk.interrupt();
+    await sleep(20);
+
+    assert.deepEqual(replies, ["ขอยืนยันก่อนค่ะ จะลบความจำทั้งหมด"]);
+    talk.stop();
+  });
+
+  test("ตัวจัดการที่โยนตอนเปลี่ยนสถานะต้องไม่ทำให้เทิร์นค้าง", async () => {
+    let พังแล้ว = false;
+    const rejections = [];
+    const onRejection = (e) => rejections.push(e);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const { talk, recognition } = await started({
+        onStateChange: (state) => {
+          if (state === "thinking" && !พังแล้ว) {
+            พังแล้ว = true;
+            throw new Error("ตัวจัดการพัง");
+          }
+        },
+      });
+      recognition.emitFinal("หนึ่ง");
+      await sleep(40);
+      recognition.emitFinal("สอง");
+      await sleep(40);
+
+      const sent = FakeWebSocket.instances.flatMap((s) => s.sent.map((m) => m.text));
+      assert.deepEqual(sent, ["สอง"], "ประโยคถัดไปต้องยังส่งได้");
+      assert.deepEqual(rejections, [], "ต้องไม่มี unhandled rejection");
+      talk.stop();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  test("กดเริ่มคุยซ้ำระหว่างรอสิทธิ์ไมค์ต้องไม่คืนค่าว่าสำเร็จทั้งที่ไม่ได้เริ่ม", async () => {
+    FakeMedia.delay = 40;
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    const แรก = talk.start();
+    talk.stop();
+    await talk.start();
+    await แรก.catch(() => {});
+    await sleep(60);
+
+    assert.ok(
+      FakeSpeechRecognition.instances.some((r) => r.running),
+      "ต้องมี recognizer ที่ทำงานอยู่จริง ไม่ใช่คืนค่าเงียบ ๆ",
+    );
+    talk.stop();
+  });
+
+  test("อ็อบเจ็กต์ที่สร้างแล้วไม่เคยเริ่มต้องไม่ทิ้งตัวจัดการค้างไว้", async () => {
+    const ก่อน = globalThis.speechSynthesis.listeners.length;
+    for (let i = 0; i < 20; i += 1) {
+      new VoiceConversation(client(), { sendAudioForSpeakerId: false });
+    }
+    assert.equal(globalThis.speechSynthesis.listeners.length, ก่อน);
+  });
+});

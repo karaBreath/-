@@ -381,8 +381,10 @@ export class ThaiSpeechSynthesis {
     readonly pitch = 1.0,
   ) {
     this.pickVoice();
-    // รายชื่อเสียงในบางเบราว์เซอร์โหลดแบบ asynchronous
-    globalThis.speechSynthesis?.addEventListener?.("voiceschanged", this.onVoices);
+    // ผูกตัวจัดการตอน start() เท่านั้น ไม่ใช่ตอนสร้าง
+    //
+    // ของเดิมผูกในคอนสตรักเตอร์ แต่ถอดได้เฉพาะทาง cleanup() อ็อบเจ็กต์ที่ถูก
+    // สร้างแล้วไม่เคยเริ่มจึงทิ้งตัวจัดการค้างไว้บน global ตลอดอายุหน้าเว็บ
   }
 
   /**
@@ -513,6 +515,14 @@ interface PendingTurn {
   id: number;
   reply: string;
   /**
+   * ข้อความของชิ้นเสียงที่ได้รับมาแล้ว
+   *
+   * ข้อความที่ระบบเขียนเอง (คำถามยืนยันการลบ คำปฏิเสธ) ส่งมาเป็น chunk ตรง ๆ
+   * ไม่มี delta เลย ``reply`` จึงว่างตลอดทั้งเทิร์น ถ้าผู้ใช้พูดแทรกตอนนั้น
+   * เขาจะไม่เห็นข้อความอะไรเลยสักอย่าง
+   */
+  spoken?: string;
+  /**
    * socket ที่ส่งเทิร์นนี้ออกไป
    *
    * จำเป็นเพราะเมื่อ socket ตาย ต้องรู้ว่าเทิร์นไหนตายไปกับมันบ้าง ของเดิม
@@ -559,7 +569,8 @@ export class VoiceConversation {
   private readonly synth: ThaiSpeechSynthesis;
   private state: VoiceState = "idle";
   private running = false;
-  private starting = false;
+  /** promise ของ start() ที่กำลังทำงานอยู่ — ให้ผู้เรียกคนถัดไปรอได้ */
+  private starting: Promise<void> | null = null;
   private recognitionPaused = false;
   /** เจอ error ที่เริ่มใหม่ไปก็ล้มซ้ำ — หยุดวนแล้วรอให้ผู้ใช้กดเริ่มใหม่เอง */
   private recognitionFatal = false;
@@ -622,8 +633,18 @@ export class VoiceConversation {
     // ต้องกันตั้งแต่ยังไม่เสร็จ ไม่ใช่กันตอน running กลายเป็น true
     // เพราะช่วงรอสิทธิ์ไมโครโฟนกินเวลาได้หลายวินาที (ครั้งแรก หรือหูฟังบลูทูธ)
     // ถ้าผู้ใช้กดปุ่มซ้ำในช่วงนั้น จะได้ไมโครโฟนสองตัวที่ปิดไม่ได้อีกเลย
-    if (this.running || this.starting) return;
-    this.starting = true;
+    // start() ที่มาระหว่างรอสิทธิ์ไมโครโฟนต้องรอผลของตัวก่อนหน้า ไม่ใช่คืนค่า
+    // ว่าสำเร็จทั้งที่ไม่ได้เริ่มอะไรเลย ของเดิมคืนเงียบ ๆ ผู้เรียกจึงเชื่อว่า
+    // บทสนทนาเริ่มแล้ว ทั้งที่ไม่มี recognizer สักตัว และไม่มี error ให้เห็น
+    if (this.starting) {
+      await this.starting;
+      if (this.running) return;
+    }
+    if (this.running) return;
+    let settle: () => void = () => {};
+    this.starting = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
     this.recognitionFatal = false;
     // เลื่อนรุ่นตอน *เริ่ม* ด้วย ไม่ใช่แค่ตอนปิด — ไม่งั้นหางของ cleanup ที่ยัง
     // ค้างอยู่ (รอปิดไมโครโฟน) จะเห็นรุ่นเดิม แล้วรื้อบทสนทนาใหม่ที่เพิ่งเริ่มทิ้ง
@@ -658,7 +679,8 @@ export class VoiceConversation {
       await this.cleanup();
       throw error;
     } finally {
-      this.starting = false;
+      this.starting = null;
+      settle();
     }
   }
 
@@ -774,7 +796,9 @@ export class VoiceConversation {
     // Chrome ยิง speechstart เมื่อมีเสียงอะไรก็ได้ ลมหายใจ เสียงรอบข้าง หรือ
     // "...หรือเปล่าคะ" ที่พูดต่อท้ายคำถามเดิม จึงทิ้งคำตอบทั้งอันโดยที่ผู้ใช้
     // ไม่ได้อะไรกลับมาเลย ไม่มีข้อความ ไม่มีเสียง ไม่มี error
-    const producing = this.pending.some((turn) => !turn.abandoned && turn.reply);
+    const producing = this.pending.some(
+      (turn) => !turn.abandoned && (turn.reply || turn.spoken),
+    );
     if (!this.audio.busy && !this.synth.busy && !producing) return;
     this.audio.stop();
     this.synth.stop();
@@ -782,6 +806,12 @@ export class VoiceConversation {
     // ให้ผลอยู่จริงคือตัวถัดไป จึงรอดไปโดยไม่ถูกขัด
     const interrupted = this.pending.find((turn) => !turn.abandoned);
     if (interrupted) {
+      // ข้อความที่ระบบเขียนเอง (คำถามยืนยันการลบ คำปฏิเสธ) ส่งมาเป็น chunk
+      // ตรง ๆ ไม่มี delta เลย turn.reply จึงว่าง ถ้ายกเลิกโดยไม่เก็บข้อความ
+      // จากชิ้นเสียงที่ได้มาแล้ว ผู้ใช้จะไม่เห็นอะไรเลยสักอย่าง
+      if (!interrupted.reply && interrupted.spoken) {
+        interrupted.reply = interrupted.spoken;
+      }
       interrupted.abandoned = true;
       // onReply ของผู้เรียกโยนได้ — ถ้าไม่ครอบ เทิร์นที่เหลือจะไม่ถูกรับกลับ
       // เข้าคิวเสียง และไมโครโฟนก็ไม่ถูกเปิดกลับมา
@@ -833,16 +863,14 @@ export class VoiceConversation {
       recognition.onend = null;
       recognition.abort();
     }
-    const generation = this.generation;
-    const recorder = this.recorder;
-    this.recorder = null;
-    await recorder?.stop();
-    if (generation !== this.generation) {
-      // ผู้ใช้กดเริ่มใหม่ระหว่างที่เรารอปิดไมโครโฟน ทุกอย่างข้างล่างเป็นของ
-      // บทสนทนาใหม่แล้ว การรื้อต่อจะปิด socket และตั้งสถานะเป็น "ปิดอยู่"
-      // ทับบทสนทนาที่กำลังทำงาน
-      return;
-    }
+    // รื้อทุกอย่างแบบซิงโครนัสก่อน แล้วค่อยรอปิดไมโครโฟนเป็นขั้นสุดท้าย
+    //
+    // ของเดิมรอปิดไมโครโฟนก่อนแล้วค่อยรื้อที่เหลือ ซึ่งเปิดช่องให้ผู้ใช้กด
+    // "เริ่มคุย" ใหม่แทรกเข้ามาได้ การใส่ยามกันไว้ก็ยิ่งแย่ เพราะการรื้อทั้ง
+    // ก้อนถูกข้ามไป: บอทพูดต่อจนจบทั้งที่กดหยุดแล้ว socket เก่าไม่ถูกปิดและ
+    // ถูกบทสนทนาใหม่ใช้ต่อ (คำตอบของเทิร์นเก่าไปโผล่เป็นคำตอบของประโยคใหม่)
+    // และตัวนับชิ้นเสียงของเบราว์เซอร์ก็ไม่ถูกล้าง ทำให้เทิร์นใหม่ปิดไม่ลง
+    // ทำแบบซิงโครนัสไม่มีช่องให้แทรกตั้งแต่ต้น จึงไม่ต้องมียามเลย
     this.audio.stop();
     this.synth.stop();
     this.synth.dispose();
@@ -850,6 +878,10 @@ export class VoiceConversation {
     this.stream = null;
     this.streamReady = null;
     this.setState("idle");
+
+    const recorder = this.recorder;
+    this.recorder = null;
+    await recorder?.stop();
   }
 
   /**
@@ -894,10 +926,14 @@ export class VoiceConversation {
         this.setState("listening");
       }
     } catch (error) {
-      this.options.onError?.(error as Error);
       this.audio.discard(turn);
       this.synth.discard(turn);
-      this.setState("listening");
+      // คำขอที่ล้มหลังบทสนทนาปิดไปแล้วต้องไม่ดึงสถานะกลับมาเป็น "กำลังฟัง"
+      // ทั้งที่ไม่มีอะไรฟังอยู่ — UI จะค้างแบบนั้นตลอดไป
+      if (generation === this.generation) {
+        this.options.onError?.(error as Error);
+        this.setState("listening");
+      }
     } finally {
       // ลดตัวนับเฉพาะเมื่อยังเป็นบทสนทนาเดิม ไม่งั้นเทิร์นเก่าจะไปลดตัวนับ
       // ของบทสนทนาใหม่จนถึงศูนย์ แล้ว maybeFinish จะล้างหมายเลขเทิร์นที่
@@ -916,7 +952,7 @@ export class VoiceConversation {
     if (!text.trim()) return;
 
     const turn = ++this.turnId;
-    this.pending.push({ id: turn, reply: "", abandoned: false });
+    this.pending.push({ id: turn, reply: "", spoken: "", abandoned: false });
     this.audio.accept(turn);
     this.synth.accept(turn);
 
@@ -934,6 +970,12 @@ export class VoiceConversation {
     });
     try {
       await this.sendTurn(turn, text, previous, generation);
+    } catch (error) {
+      // submit ถูกเรียกแบบ void ไม่มีใครรับ rejection ตัวจัดการของผู้เรียกที่
+      // โยน (เช่น onStateChange) จึงกลายเป็น unhandled rejection ที่ฆ่าหน้าเว็บ
+      // และเทิร์นก็ค้างในคิวโดยไม่มีใครเก็บกวาด
+      this.dropTurn(turn);
+      this.reportLater(error);
     } finally {
       // ต้องปล่อยคิวเสมอ ไม่ว่าจะเกิดอะไรขึ้นระหว่างทาง
       //
@@ -1139,6 +1181,7 @@ export class VoiceConversation {
         this.options.onReplyDelta?.(text);
         break;
       case "chunk":
+        turn.spoken = (turn.spoken ?? "") + text;
         this.setState("speaking");
         if (event.audio) this.audio.push(turn.id, event.audio, event.mime ?? "audio/mpeg");
         else this.synth.speak(turn.id, text);
@@ -1166,15 +1209,19 @@ export class VoiceConversation {
   }
 
   /**
-   * โยน error ของตัวจัดการผู้เรียกออกไปทีหลัง โดยไม่ให้ล้มขั้นตอนที่เหลือ
+   * รายงาน error ที่หลุดออกมาจากตัวจัดการของผู้เรียก
    *
-   * ตัวจัดการที่โยนต้องไม่ถูกกลืน (ผู้เรียกควรได้เห็น) แต่ก็ต้องไม่ทำให้
-   * สถานะภายในค้างกลางคัน จึงเลื่อนไปโยนใน macrotask แยก
+   * ต้องไม่ถูกกลืนเงียบ ๆ (ผู้เรียกควรได้เห็น) และต้องไม่ทำให้สถานะภายในค้าง
+   * เคยเลื่อนไปโยนใน macrotask แยก ซึ่งใน Node กลายเป็น uncaughtException
+   * ที่ไม่มีใครดักได้เลย — แย่กว่าการกลืน ที่นี่จึงส่งผ่าน onError แทน
+   * และถ้า onError เองก็โยน ก็ยอมกลืนตรงนั้น เพราะไม่เหลือทางอื่นแล้ว
    */
   private reportLater(error: unknown): void {
-    setTimeout(() => {
-      throw error;
-    }, 0);
+    try {
+      this.options.onError?.(error as Error);
+    } catch {
+      // ตัวจัดการ error พังเอง — ไม่เหลือช่องทางรายงานแล้ว
+    }
   }
 
   private onPlaybackIdle(): void {
