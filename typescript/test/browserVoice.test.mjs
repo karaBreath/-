@@ -1380,6 +1380,162 @@ describe("วงจรเริ่ม-หยุด", () => {
     );
   });
 
+  test("ไม่มีอะไรปลุกสถานะกำลังฟังกลับมาได้หลังกดหยุด", async () => {
+    // interrupt() ถือสำเนาของ "เปลี่ยนเป็นกำลังฟัง + เปิดไมค์กลับมา" เป็นของ
+    // ตัวเอง ไม่เดินผ่าน finishTurn ยามที่นั่นจึงคุ้มไม่ถึง
+    // onspeechstart ที่ยังค้างอยู่ก็ยิง interrupt() ได้หลังผู้ใช้กดหยุด
+    // แล้วป้ายบนหน้าเว็บค้างที่ "กำลังฟัง" ตลอดไป
+    for (const ปลุก of ["interrupt", "pushToTalkStart", "speechstart"]) {
+      FakeWebSocket.openDelay = 5;
+      const สถานะ = [];
+      const talk = new VoiceConversation(client(), {
+        sendAudioForSpeakerId: false,
+        serverTts: true,
+        bargeIn: true,
+        onStateChange: (s) => สถานะ.push(s),
+      });
+      await talk.start();
+      const recognition = FakeSpeechRecognition.instances.at(-1);
+      talk.stop();
+      await sleep(120);
+      สถานะ.length = 0;
+
+      if (ปลุก === "interrupt") talk.interrupt();
+      else if (ปลุก === "pushToTalkStart") talk.pushToTalkStart();
+      else recognition.onspeechstart?.();
+      await sleep(120);
+
+      assert.ok(!สถานะ.includes("listening"), `${ปลุก}: ${สถานะ.join(",")}`);
+      assert.equal(talk.state, "idle", ปลุก);
+    }
+  });
+
+  test("ปล่อยปุ่มพูดหลังกดหยุด ต้องไม่อัปโหลดเสียงต่อ", async () => {
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    await talk.start();
+    talk.pushToTalkStart();
+    await sleep(10);
+    talk.stop();
+    const ก่อน = FakeWebSocket.instances.length;
+    await talk.pushToTalkStop();
+    await sleep(80);
+
+    assert.equal(FakeWebSocket.instances.length, ก่อน, "เปิดการเชื่อมต่อใหม่หลังกดหยุด");
+    assert.equal(talk.state, "idle");
+  });
+
+  test("พูดแทรกในจังหวะเดียวกับที่กดหยุด ต้องไม่ปลุกสถานะกำลังฟัง", async () => {
+    // คิวเสียงยังรายงานว่า busy อยู่ชั่วขณะหลัง cleanup เพราะเบราว์เซอร์คิว
+    // เหตุการณ์ pause เป็น task ยามที่ interrupt() ใช้ดูว่า "มีอะไรให้ขัดไหม"
+    // จึงไม่กัน แล้วมันไปตั้งสถานะเป็น "กำลังฟัง" ต่อ
+    FakeWebSocket.openDelay = 5;
+    const สถานะ = [];
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      bargeIn: true,
+      onStateChange: (s) => สถานะ.push(s),
+    });
+    await talk.start();
+    FakeSpeechRecognition.instances.at(-1).emitFinal("สวัสดี");
+    await sleep(30);
+    FakeWebSocket.instances.at(-1).emit({
+      type: "chunk",
+      text: "กำลังตอบอยู่",
+      audio: "QUFB",
+    });
+    await sleep(5);
+
+    talk.stop();
+    สถานะ.length = 0;
+    talk.interrupt();
+    await sleep(150);
+
+    assert.ok(!สถานะ.includes("listening"), สถานะ.join(","));
+    assert.equal(talk.state, "idle");
+  });
+
+  test("ปล่อยปุ่มพูดในจังหวะเดียวกับที่กดหยุด ต้องไม่ส่งเสียงขึ้นเซิร์ฟเวอร์", async () => {
+    // ตัวอัดเสียงยังไม่ถูกล้างจนกว่า cleanup จะได้คิว ยาม generation ก็ช่วย
+    // ไม่ได้เพราะมันเก็บค่าหลัง stop() เลื่อนไปแล้ว
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    await talk.start();
+    talk.pushToTalkStart();
+    FakeAudioContext.instances.at(-1).emit(new Float32Array(1600));
+    await sleep(10);
+
+    const ก่อน = FakeWebSocket.instances.length;
+    talk.stop();
+    await talk.pushToTalkStop();
+    await sleep(100);
+
+    assert.equal(
+      FakeWebSocket.instances.length,
+      ก่อน,
+      "ส่งเสียงขึ้นเซิร์ฟเวอร์หลังผู้ใช้กดหยุด",
+    );
+  });
+
+  test("กดหยุดตอนไมค์ถูกพัก แล้วเริ่มใหม่ ต้องยังพักไมค์ตอนบอทพูด", async () => {
+    // ถ้า cleanup ไม่รีเซ็ตธง "ไมค์ถูกพักอยู่" เซสชันใหม่จะเชื่อว่าพักไปแล้ว
+    // แล้วไม่พักอีก ไมค์จึงเปิดอยู่ตอนบอทพูด — ลูปบอทได้ยินเสียงตัวเอง
+    FakeWebSocket.openDelay = 5;
+    const opts = { sendAudioForSpeakerId: false, serverTts: true };
+    // ต้องใช้อ็อบเจกต์ *ตัวเดิม* — ธงนี้เป็นของแต่ละอินสแตนซ์
+    const talk2 = new VoiceConversation(client(), opts);
+    await talk2.start();
+    FakeSpeechRecognition.instances.at(-1).emitFinal("สวัสดี");
+    await sleep(30);
+    talk2.stop();
+    await sleep(120);
+
+    await talk2.start();
+    const rec2 = FakeSpeechRecognition.instances.at(-1);
+    rec2.emitFinal("สวัสดีอีกครั้ง");
+    await sleep(30);
+    FakeWebSocket.instances.at(-1).emit({
+      type: "chunk",
+      text: "บอทกำลังพูด",
+      audio: "QUFB",
+    });
+    await sleep(10);
+
+    assert.equal(rec2.running, false, "ไมค์ยังฟังอยู่ขณะบอทพูด");
+    talk2.stop();
+    await sleep(60);
+  });
+
+  test("การเชื่อมต่อของเซสชันที่ปิดไปแล้วต้องไม่ค้างเปิด", async () => {
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+    });
+    await talk.start();
+    FakeSpeechRecognition.instances.at(-1).emitFinal("สวัสดี");
+    await sleep(30);
+    talk.stop();
+    await sleep(150);
+
+    const เปิดค้าง = FakeWebSocket.instances.filter((w) => w.readyState < 2);
+    assert.equal(เปิดค้าง.length, 0, "socket ค้างเปิดหลังกดหยุด");
+  });
+
+  test("cleanup ต้องปลดตัวจัดการของ recognizer ให้ครบทุกตัว", async () => {
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      bargeIn: true,
+    });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+    talk.stop();
+    await sleep(80);
+
+    for (const ชื่อ of ["onresult", "onerror", "onend", "onspeechstart"]) {
+      assert.equal(recognition[ชื่อ], null, ชื่อ);
+    }
+  });
+
   test("ข้อผิดพลาดตอนปิดต้องไปทาง onError ไม่ใช่ค้างเป็น unhandled rejection", async () => {
     const พบ = [];
     const talk = new VoiceConversation(client(), {

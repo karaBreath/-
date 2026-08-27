@@ -308,6 +308,11 @@ startBtn.addEventListener("click", async () => {
 stopBtn.addEventListener("click", () => {
   talk?.stop();
   talk = null;
+  // ล้างฟองข้อความที่ค้างครึ่งใบ ไม่งั้นกดหยุดกลางประโยคแล้วฟองนั้นค้างอยู่
+  // แล้วประโยคแรกของเซสชันถัดไปไปโผล่ในฟองเก่านั้น ซึ่งอยู่ผิดตำแหน่ง
+  interimEl?.remove();
+  interimEl = null;
+  botEl = null;
   startBtn.disabled = false;
   stopBtn.disabled = true;
   talkBtn.hidden = true;

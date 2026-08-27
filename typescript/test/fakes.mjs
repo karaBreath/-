@@ -44,19 +44,28 @@ export class FakeAudio {
       clearTimeout(this._timer);
       FakeAudio.live -= 1;
     }
-    this.onpause?.();
+    // เบราว์เซอร์จริงคิว "pause" เป็น task ไม่ยิงแบบซิงโครนัส
+    //
+    // การยิงทันทีทำให้หน้าต่างที่คิวเสียงยังรายงานว่า busy หลัง cleanup
+    // ดูกว้างแค่ 1 microtask ทั้งที่ของจริงกว้างเต็ม 1 task — บั๊กที่อาศัย
+    // หน้าต่างนั้นจึงมองไม่เห็นเลยในชุดทดสอบ
+    setTimeout(() => this.onpause?.(), 0);
   }
 }
 
 /** MediaStream / AudioContext ปลอม — นับว่ามีอะไรค้างเปิดอยู่บ้าง */
 export class FakeAudioContext {
   static live = 0;
+  /** อินสแตนซ์ล่าสุดใช้ป้อนเสียงเข้าตัวอัดในเทสต์ได้ */
+  static instances = [];
   static reset() {
     FakeAudioContext.live = 0;
+    FakeAudioContext.instances = [];
   }
 
   constructor() {
     FakeAudioContext.live += 1;
+    FakeAudioContext.instances.push(this);
     this.sampleRate = 48000;
     this.state = "running";
     this.destination = { name: "destination" };
