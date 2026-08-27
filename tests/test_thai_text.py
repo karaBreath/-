@@ -1213,3 +1213,32 @@ class Testรหัสยาวและช่วงที่ไม่ใช่�
         assert "-" not in spoken, spoken
         assert "ถึง" in spoken, spoken
         assert "นาฬิกา" not in spoken, spoken
+
+
+class Testความเร็วของตัวตัดท่อน:
+    """feed() ก้อนใหญ่ก้อนเดียวเคยเป็น O(n²)
+
+    _find_cut สแกนบัฟเฟอร์ทั้งก้อนทุกรอบ ทั้งที่จุดตัดไม่มีทางอยู่เลย max_chars
+    ข้อความห้าหมื่นอักขระจึงใช้เวลาหกวินาที
+    """
+
+    def test_ข้อความยาวมากต้องเร็ว(self):
+        import time
+
+        source = "สวัสดีครับ วันนี้อากาศดีมาก " * 2000
+        chunker = SpeechChunker()
+        start = time.time()
+        chunks = list(chunker.feed(source)) + list(chunker.flush())
+        elapsed = time.time() - start
+
+        assert elapsed < 1.0, f"ใช้เวลา {elapsed:.2f}s"
+        assert "".join(chunks).replace(" ", "") == source.replace(" ", "")
+
+    def test_ท่อนต้องไม่ยาวเกิน_max_chars_แม้ป้อนก้อนเดียว(self):
+        """การสแกนไม่จำกัดเคยคืนจุดตัดที่อยู่เลย max_chars ไปไกล"""
+        chunker = SpeechChunker(min_chars=10, max_chars=40)
+        source = "กขคง " * 200
+        chunks = list(chunker.feed(source)) + list(chunker.flush())
+        assert all(len(chunk) <= 40 for chunk in chunks), [
+            len(c) for c in chunks if len(c) > 40
+        ]

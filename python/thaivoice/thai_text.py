@@ -1127,16 +1127,23 @@ class SpeechChunker:
         if len(buf) < self.phrase_min_chars:
             return None
 
-        nl = buf.find("\n")
+        # มองแค่ช่วงต้นบัฟเฟอร์เท่าที่จะตัดได้จริง
+        #
+        # จุดตัดไม่มีทางอยู่เลย max_chars อยู่แล้ว การสแกนทั้งบัฟเฟอร์ทุกครั้ง
+        # ทำให้ feed() ก้อนใหญ่ก้อนเดียวกลายเป็น O(n²) — ข้อความห้าหมื่นอักขระ
+        # ใช้เวลาหกวินาที และยังทำให้ท่อนที่ได้ยาวเกิน max_chars ด้วย
+        window = buf if len(buf) <= self.max_chars else buf[: self.max_chars]
+
+        nl = window.find("\n")
         if nl >= 0:
             # ขึ้นบรรทัดใหม่คือจุดตัดที่ชัดที่สุด ใช้ได้แม้ท่อนจะสั้น
             return nl + 1
 
-        for end in _sentence_ends(buf):
+        for end in _sentence_ends(window):
             if end >= self.phrase_min_chars:
                 return end
 
-        for match in _PARTICLE_BREAK.finditer(buf):
+        for match in _PARTICLE_BREAK.finditer(window):
             # ต้องมีช่องว่างตามหลังจริง ๆ ในบัฟเฟอร์ ไม่ใช่แค่ "จบบัฟเฟอร์"
             #
             # คำลงท้ายหลายคำเป็นคำย่อยของคำธรรมดา (ค่า ใน ค่าไฟ, คับ ใน คับแคบ,
@@ -1164,13 +1171,13 @@ class SpeechChunker:
         # อย่าตัดจนเหลือหางสั้นจู๋ ("... เซนติเมตร" | "ค่ะ") — คำลงท้ายคำเดียว
         # ที่ถูกส่งไปสังเคราะห์เสียงแยกต่างหากฟังเหมือนคนละประโยค
         # ระหว่างสตรีมยังมีข้อความตามมาอีก รอให้หางยาวพอแล้วค่อยตัด
-        space = buf.find(" ", self.min_chars)
+        space = window.find(" ", self.min_chars)
         while space > 0 and space + 1 < len(buf):
             if buf[space + 1].isdigit() or buf[space - 1].isdigit():
-                space = buf.find(" ", space + 1)
+                space = window.find(" ", space + 1)
                 continue
             if len(buf) - (space + 1) < self.phrase_min_chars:
-                space = buf.find(" ", space + 1)
+                space = window.find(" ", space + 1)
                 continue
             return space + 1
 
