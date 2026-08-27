@@ -189,9 +189,17 @@ class ServerRuntime:
         # stream_executor จะได้ join(0) คืนทันที แล้ว store.close() ไปทับเทิร์น
         # ที่ยังเขียนอยู่ — "Cannot operate on a closed database" ซึ่งถูกกลืนทิ้ง
         # ผู้ใช้ได้ยินคำตอบไปแล้วแต่บทสนทนาไม่ถูกบันทึก
-        _join(self.stream_executor.shutdown, timeout)
+        # แบ่งงบเดียวเป็นสัดส่วน ไม่ใช่ให้ก้อนเต็มทั้งคู่
+        #
+        # ให้ก้อนเต็มทั้งคู่แปลว่าเวลาปิดรวมเป็นสองเท่าของ timeout (20 วินาที
+        # ที่ค่าเริ่มต้น) ซึ่งเกิน grace period ของ docker stop ที่ 10 วินาที
+        # ระบบจึงโดน SIGKILL ก่อน store.close() ได้ทำงาน — ย้อนไปเป็นอาการเดิม
+        # ที่การแบ่งงบตั้งใจแก้ แต่ยังต้องรับประกันว่าเทิร์นที่กำลังคุยอยู่ได้งบ
+        # ก้อนของตัวเองเสมอ ไม่ใช่เศษที่งานสกัดเหลือให้
+        stream_budget = timeout * 0.7 if self.extractor is not None else timeout
+        _join(self.stream_executor.shutdown, stream_budget)
         if self.extractor is not None:
-            _join(self.extractor.shutdown, timeout)
+            _join(self.extractor.shutdown, timeout - stream_budget)
         self.store.close()
 
 
@@ -266,7 +274,10 @@ def create_app(settings: "Settings | None" = None, runtime: "ServerRuntime | Non
         yield
         # คืนทรัพยากรตอนปิดเซิร์ฟเวอร์ — thread pool ของตัวสกัดความจำต้องถูกปิด
         # ไม่งั้นกระบวนการอาจค้างรอเธรดตอนออก
-        runtime.close()
+        #
+        # ต้องไปทำในเธรดอื่น close() รอเธรดอยู่หลายวินาที การเรียกตรง ๆ บน
+        # event loop ทำให้ WebSocket ที่เหลือค้างหมดตลอดช่วงนั้น
+        await asyncio.to_thread(runtime.close)
 
     app = FastAPI(
         title="thaivoice",

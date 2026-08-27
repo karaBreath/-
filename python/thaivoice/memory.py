@@ -146,6 +146,7 @@ class SpeakerStats:
     facts: int
     first_seen: float | None
     last_seen: float | None
+    summaries: int = 0
 
 
 # ตัวคั่นสำหรับกุญแจของคนชื่อซ้ำ — ต้องเป็นอักขระที่ผู้ใช้พิมพ์เข้ามาไม่ได้
@@ -698,6 +699,12 @@ class MemoryStore:
 
         ต้องลบทั้ง facts, summaries และ turns — การลบแค่ facts ทำให้บทสรุปและ
         บทสนทนาดิบยังไหลกลับเข้า prompt รอบถัดไป ซึ่งเท่ากับโกหกผู้ใช้ว่าลบแล้ว
+
+        ล้างชื่อเล่น เพศ และบันทึกย่อในโปรไฟล์ด้วย — ช่องพวกนี้ถูกเติมโดยโมเดล
+        ที่อ่านจากบทสนทนา (ดู MemoryExtractor._apply) จึงเป็นสิ่งที่ *สกัดมาจาก*
+        บทสนทนาที่กำลังจะถูกลบ ของเดิมปล่อยไว้ บอทจึงยังเรียกผู้ใช้ด้วยชื่อเล่น
+        ที่มันเดาเอาเองต่อไปหลังผู้ใช้สั่งลบทุกอย่าง
+        ``display_name`` ยังอยู่ เพราะนั่นคือตัวตนที่เราบอกว่ายังจำได้
         """
         with self._lock:
             removed = {
@@ -711,6 +718,11 @@ class MemoryStore:
                     "DELETE FROM turns WHERE speaker_id = ?", (speaker_id,)
                 ).rowcount,
             }
+            self._conn.execute(
+                "UPDATE speakers SET nickname = NULL, gender = NULL, "
+                "particle = NULL, notes = NULL, meta_json = '{}' WHERE id = ?",
+                (speaker_id,),
+            )
             # เลื่อนเสมอด้วยเหตุผลเดียวกับ forget_all_facts ข้างบน
             self._bump_memory_epoch(speaker_id)
             self._conn.commit()
@@ -796,11 +808,16 @@ class MemoryStore:
             facts = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM facts WHERE speaker_id = ?", (speaker_id,)
             ).fetchone()
+            summaries = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM summaries WHERE speaker_id = ?",
+                (speaker_id,),
+            ).fetchone()
         return SpeakerStats(
             turns=int(row["n"]),
             facts=int(facts["n"]),
             first_seen=row["first"],
             last_seen=row["last"],
+            summaries=int(summaries["n"]),
         )
 
 

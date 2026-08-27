@@ -771,3 +771,58 @@ class Testคำยืนยันต้องไม่ขัดกับคำ�
 
         assert not _re.search(r"\d+ ข้อความ", ถาม), ถาม
         assert "เรียบร้อยแล้ว" in ลบ, ลบ
+
+
+class Testขอลบซ้ำระหว่างรอยืนยัน:
+    def test_ขอลบอีกครั้งต้องไม่ถูกตีความว่ายกเลิก(self, session, store):
+        """สาขา "มีคำขอค้าง" ทำงานก่อนเสมอ คำขอลบใหม่จึงถูกนับเป็นคำตอบไม่ชัด
+
+        แล้วไปยกเลิกคำขอเดิม ซึ่งตรงข้ามกับที่ผู้ใช้เพิ่งขอ จากนั้น "ยืนยัน"
+        ก็ไม่ลบอะไรเลยเพราะไม่มีคำขอค้างอยู่แล้ว
+        """
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("เอ่อ เดี๋ยวนะ", speaker=speaker, speak=False)
+        ขอซ้ำ = session.exchange("ลบความจำทั้งหมดเลย", speaker=speaker, speak=False)
+
+        assert "ยกเลิก" not in ขอซ้ำ.reply, ขอซ้ำ.reply
+        assert speaker.id in session._pending_forget, "คำขอต้องยังค้างอยู่"
+
+        session.exchange("ยืนยัน", speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id) == [], "ยืนยันแล้วต้องลบจริง"
+
+
+class Testคำยืนยันต้องพูดถึงเฉพาะของที่มีจริง:
+    def test_ไม่มีบทสรุปต้องไม่พูดถึงบทสรุป(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        reply = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False).reply
+        assert "บทสรุป" not in reply, reply
+
+    def test_มีบทสรุปต้องพูดถึง(self, session, store):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        store.save_summary(speaker.id, "สรุปบทสนทนา", 1)
+        reply = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False).reply
+        assert "บทสรุป" in reply, reply
+
+    def test_ไคลเอนต์ตัดกลางคันแล้วคำเตือนต้องยังถูกบันทึก(self, session, store):
+        """เส้นทางที่พบบ่อยที่สุดคือ GeneratorExit ไม่ใช่ Exception
+
+        เทสต์เดิมโยน RuntimeError ซึ่งเป็นลูกของ Exception อยู่แล้ว การเปลี่ยน
+        `except BaseException` เป็น `except Exception` จึงผ่านชุดทดสอบทั้งชุด
+        """
+        speaker = session.register_speaker("เดช")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+
+        gen = session.stream_exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+        # ดึงจนได้ยินคำเตือนแล้วทิ้ง generator เหมือนไคลเอนต์ตัดการเชื่อมต่อ
+        for event in gen:
+            if event.type == "chunk":
+                break
+        gen.close()
+
+        เนื้อหา = [t.content for t in store.recent_turns(speaker.id) if t.role == "assistant"]
+        assert any("ยังไม่ได้ลบ" in c for c in เนื้อหา), เนื้อหา

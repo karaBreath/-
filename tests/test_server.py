@@ -673,3 +673,28 @@ class Testปิดเซิร์ฟเวอร์ระหว่างที�
         # ของเดิมแบ่งงบต่อคิว งานสกัดกิน 0.3 วินาทีจนหมด เทิร์นที่กำลังเขียน
         # จึงได้ join(0) แล้ว store.close() ไปทับมันกลางคัน
         assert ผลการเขียน == ["บันทึกได้"], ผลการเขียน
+
+
+class Testเวลาปิดต้องไม่เกินงบที่กำหนด:
+    def test_เวลาปิดรวมต้องไม่เกิน_timeout(self, settings, fake_client, tts):
+        """ให้งบก้อนเต็มทั้งสอง pool แปลว่าเวลาปิดรวมเป็นสองเท่าของ timeout
+
+        ซึ่งเกิน grace period ของ docker stop ระบบจึงโดน SIGKILL ก่อน
+        store.close() ได้ทำงาน — ย้อนไปเป็นอาการเดิมที่การแบ่งงบตั้งใจแก้
+        """
+        import time as _time
+
+        runtime = server_module.ServerRuntime(settings, client=fake_client, tts=tts)
+
+        class ไม่ยอมปิด:
+            def shutdown(self, wait: bool = True) -> None:
+                _time.sleep(30)
+
+        runtime.extractor = ไม่ยอมปิด()
+        runtime.stream_executor = ไม่ยอมปิด()
+
+        เริ่ม = _time.monotonic()
+        runtime.close(timeout=1.0)
+        ใช้เวลา = _time.monotonic() - เริ่ม
+
+        assert ใช้เวลา < 1.5, f"ใช้เวลา {ใช้เวลา:.2f} วินาที (งบ 1.0)"

@@ -247,11 +247,16 @@ def _pending_summary(stats: "SpeakerStats") -> str:
         # ("อีก" ยังแปลว่า "เพิ่มอีก" ด้วย ฟังเหมือนมีของอยู่ก่อนแล้ว)
         # จำนวนข้อความดิบไม่ใช่สิ่งที่ผู้ใช้ต้องรู้เพื่อตัดสินใจอยู่แล้ว
         parts.append("บทสนทนาที่คุยกันมา")
+    # พูดถึงบทสรุปเฉพาะเมื่อมีจริง — ของเดิมต่อท้ายเสมอ ซึ่งขัดกับประโยคตอนลบ
+    # จริงที่ตั้งใจไม่พูดถึงของที่ไม่มี
+    if stats.summaries > 0:
+        parts.append("บทสรุปที่เคยบันทึกไว้")
     if not parts:
         return "ทั้งหมด"
     if len(parts) == 1:
-        return f"ทั้งหมด ทั้ง{parts[0]} และบทสรุปที่เคยบันทึกไว้"
-    return f"ทั้งหมด ทั้ง{parts[0]} ทั้ง{parts[1]} และบทสรุปที่เคยบันทึกไว้"
+        return f"ทั้งหมด ทั้ง{parts[0]}"
+    listed = " ".join(f"ทั้ง{part}" for part in parts[:-1])
+    return f"ทั้งหมด {listed} และ{parts[-1]}"
 
 
 def _removed_summary(removed: dict[str, int], particle: str = "ค่ะ") -> str:
@@ -493,15 +498,20 @@ class ConversationSession:
             self.store.record_turn(speaker.id, self.session_id, "user", transcript)
 
         reply = ""
-        if notice:
-            yield SessionEvent("delta", text=notice + " ", speaker=speaker)
-            yield SessionEvent(
-                "chunk",
-                text=notice,
-                speaker=speaker,
-                speech=self._speak(notice) if speak else None,
-            )
         try:
+            # การยิงคำเตือนต้องอยู่ใน try เดียวกับสตรีมของโมเดล
+            #
+            # ถ้าไคลเอนต์ตัดการเชื่อมต่อ *ระหว่าง* สองเฟรมนี้ generator ถูกปิด
+            # ตรงนั้น คำเตือนจึงไม่ถูกบันทึกเลย ทั้งที่สถานะ _forget_nudged
+            # เปลี่ยนไปแล้ว ซึ่งคือกรณีที่ตัวจัดการข้างล่างมีไว้กันพอดี
+            if notice:
+                yield SessionEvent("delta", text=notice + " ", speaker=speaker)
+                yield SessionEvent(
+                    "chunk",
+                    text=notice,
+                    speaker=speaker,
+                    speech=self._speak(notice) if speak else None,
+                )
             for event in self.brain.stream(
                 transcript,
                 speaker,
@@ -523,11 +533,20 @@ class ConversationSession:
             # ข้อความแจ้งเรื่องคำขอลบถูกส่งให้ผู้ใช้ไปแล้ว และสถานะก็เปลี่ยนไปแล้ว
             # ถ้าโมเดลล่มตรงนี้แล้วเราไม่บันทึกอะไรเลย ประวัติจะไม่มีร่องรอยว่า
             # เคยเตือนเขาไป เทิร์นถัดไปจะยกเลิกคำขอลบทั้งที่เขาไม่เคยได้ยินคำเตือน
+            #
+            # ต้องเป็น BaseException ไม่ใช่ Exception — เส้นทางที่พบบ่อยที่สุด
+            # คือ GeneratorExit ตอนไคลเอนต์ตัดการเชื่อมต่อกลางเทิร์น ซึ่งไม่ใช่
+            # ลูกของ Exception
             if notice and speaker is not None:
                 self._note_assistant_reply(notice)
-                self.store.record_turn(
-                    speaker.id, self.session_id, "assistant", notice
-                )
+                try:
+                    self.store.record_turn(
+                        speaker.id, self.session_id, "assistant", notice
+                    )
+                except Exception:
+                    # ฐานข้อมูลอาจถูกปิดไปแล้วถ้าเซิร์ฟเวอร์กำลังปิดตัว
+                    # การโยนทับที่นี่จะไปบังสาเหตุจริงที่กำลังจะ raise ต่อ
+                    log.warning("บันทึกคำเตือนเรื่องคำขอลบไม่สำเร็จ", exc_info=True)
             raise
 
         if notice:
@@ -600,6 +619,25 @@ class ConversationSession:
 
         # คนที่กำลังพูดมีคำขอค้างอยู่ไหม — คำขอของคนอื่นต้องไม่ถูกแตะ
         if speaker is not None and speaker.id in self._pending_forget:
+            # ขอลบซ้ำ = ยืนยันเจตนา ไม่ใช่ "ตอบไม่ชัด"
+            #
+            # ของเดิมสาขานี้ทำงานก่อนเสมอ คำขอลบอันใหม่จึงถูกนับเป็นคำตอบที่ไม่ชัด
+            # แล้วไป *ยกเลิก* คำขอเดิม ซึ่งตรงข้ามกับที่ผู้ใช้เพิ่งขอ จากนั้นบอท
+            # ก็วนบอกให้พูดประโยคที่เขาเพิ่งพูดไป และ "ยืนยัน" หลังจากนั้นก็ไม่ลบ
+            # อะไรเลย เพราะไม่มีคำขอค้างอยู่แล้ว
+            if detect_forget_all(transcript):
+                self._pending_forget[speaker.id] = time.time()
+                self._forget_nudged.discard(speaker.id)
+                stats = self.store.stats(speaker.id)
+                return self._say(
+                    f"ยังไม่ได้ลบนะ{_soft(particle)} ขอยืนยันอีกครั้ง{particle} "
+                    f"จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}"
+                    f"{_pending_summary(stats)} "
+                    f'ถ้าแน่ใจ พูดว่า "ยืนยัน" ได้เลย{particle}',
+                    speaker,
+                    speak,
+                    user_text=transcript,
+                )
             answer = is_affirmative(transcript)
             if answer is True:
                 del self._pending_forget[speaker.id]

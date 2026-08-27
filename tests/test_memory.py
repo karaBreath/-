@@ -359,3 +359,36 @@ class Testเขียนได้ต่อเมื่อรุ่นควา�
         worker.join(timeout=5)
 
         assert store.facts_for(speaker.id) == [], "ความจำรอดจากคำสั่งลบ"
+
+
+class Testลบทุกอย่างต้องล้างโปรไฟล์ที่โมเดลเดาไว้ด้วย:
+    """ชื่อเล่นและเพศถูกเติมโดยโมเดลที่อ่านจากบทสนทนา
+
+    จึงเป็นสิ่งที่สกัดมาจากบทสนทนาที่กำลังจะถูกลบ ของเดิมปล่อยไว้ บอทจึงยัง
+    เรียกผู้ใช้ด้วยชื่อเล่นที่มันเดาเอาเองหลังผู้ใช้สั่งลบทุกอย่าง
+    """
+
+    def test_ชื่อเล่นและเพศต้องถูกล้าง(self, store):
+        speaker = store.create_speaker("เดช")
+        store.update_speaker(speaker.id, nickname="ชาย", gender="male", particle="ครับ")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+
+        store.forget_everything(speaker.id)
+
+        after = store.get_speaker(speaker.id)
+        assert after.nickname is None
+        assert after.gender is None
+        assert after.particle is None
+
+    def test_ชื่อที่ใช้เรียกยังเป็นชื่อเดิม(self, store):
+        """ยังรู้จักตัวเขาอยู่ — display_name คือตัวตนที่เราบอกว่ายังจำได้"""
+        speaker = store.create_speaker("เดช")
+        store.update_speaker(speaker.id, nickname="ชาย")
+        store.forget_everything(speaker.id)
+        assert store.get_speaker(speaker.id).call_name == "เดช"
+
+    def test_stats_นับบทสรุปด้วย(self, store):
+        speaker = store.create_speaker("เดช")
+        assert store.stats(speaker.id).summaries == 0
+        store.save_summary(speaker.id, "สรุป", 1)
+        assert store.stats(speaker.id).summaries == 1
