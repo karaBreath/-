@@ -1290,6 +1290,34 @@ describe("วงจรเริ่ม-หยุด", () => {
     );
   });
 
+  test("กดหยุดระหว่างรอสิทธิ์ไมค์ ต้องไม่มีสถานะกำลังฟังตามมา", async () => {
+    // การเข้าคิวอย่างเดียวทำให้ยาม "ผู้ใช้กดหยุดหรือยัง" ใน beginListening
+    // กลายเป็นโค้ดตาย รุ่นไม่ถูกเลื่อนจนกว่า cleanup จะได้คิว ซึ่งเป็นหลัง
+    // beginListening ทำงานเสร็จแล้ว ผู้ใช้จึงเห็นไฟไมค์ติดหลังกดหยุด
+    FakeMedia.delay = 60;
+    const สถานะ = [];
+    const talk = new VoiceConversation(client(), {
+      serverTts: true,
+      onStateChange: (s) => สถานะ.push(s),
+    });
+    void talk.start();
+    await sleep(10);
+    talk.stop();
+    const หลังกดหยุด = สถานะ.length;
+    await sleep(200);
+
+    assert.deepEqual(
+      สถานะ.slice(หลังกดหยุด),
+      [],
+      "มีการเปลี่ยนสถานะหลังกดหยุด",
+    );
+    assert.equal(FakeTrack.live, 0);
+    assert.equal(
+      FakeSpeechRecognition.instances.filter((r) => r.running).length,
+      0,
+    );
+  });
+
   test("กดเริ่มซ้อนกันหลายครั้งเมื่อครั้งแรกล้ม ต้องไม่รั่วไมโครโฟน", async () => {
     FakeMedia.delay = 20;
     // ปฏิเสธเฉพาะครั้งแรก — ผู้ใช้กดไม่อนุญาต แล้วกดปุ่มรัว ๆ อีกสองที
@@ -1314,6 +1342,42 @@ describe("วงจรเริ่ม-หยุด", () => {
     talk.stop();
     await sleep(60);
     assert.equal(FakeTrack.live, 0);
+  });
+
+  test("กดหยุดขณะบอทกำลังพูด ต้องไม่เปิดไมค์กลับมาตอนเสียงหยุด", async () => {
+    // cleanup เรียก audio.stop() ซึ่งทำให้คิวเสียงว่าง แล้วไหลไปถึง
+    // maybeFinish -> finishTurn ถ้าไม่มียามตรวจว่ายังทำงานอยู่ไหม
+    // ลำดับสถานะจะกลายเป็น speaking -> idle -> listening (ไมค์กลับมาหลังกดหยุด)
+    const สถานะ = [];
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      onStateChange: (s) => สถานะ.push(s),
+    });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitFinal("สวัสดี");
+    await sleep(30);
+    FakeWebSocket.instances[0].emit({
+      type: "chunk",
+      text: "กำลังตอบอยู่ค่ะ",
+      audio: "QUFB",
+    });
+    await sleep(10);
+
+    talk.stop();
+    const หลังกดหยุด = สถานะ.length;
+    await sleep(120);
+
+    assert.ok(
+      !สถานะ.slice(หลังกดหยุด).includes("listening"),
+      `ไมค์กลับมาหลังกดหยุด: ${สถานะ.join(" -> ")}`,
+    );
+    assert.equal(
+      FakeSpeechRecognition.instances.filter((r) => r.running).length,
+      0,
+    );
   });
 
   test("ข้อผิดพลาดตอนปิดต้องไปทาง onError ไม่ใช่ค้างเป็น unhandled rejection", async () => {
