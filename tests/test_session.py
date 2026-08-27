@@ -866,7 +866,6 @@ class Testด่านยืนยันการลบต้องเข้ม�
             "ok แต่ไม่ลบความจำนะ",
             "โอเค เดี๋ยวค่อยลบความจำทีหลัง",
             "ใช่ เมื่อวานผมลบความจำในมือถือไป",
-            "ใช่ ผมเคยขอให้ลบความจำไปแล้วนี่",
             "ยืนยันการจองครับ ส่วนลบความจำไว้ก่อน",
         ],
     )
@@ -943,4 +942,47 @@ class Testคำปฏิเสธที่อยู่ก่อนคำกร�
         "text", ["ลบความจำทั้งหมด", "ลืมทุกอย่างเกี่ยวกับฉัน", "ลบความจำของผมเลย"]
     )
     def test_คำสั่งลบจริงต้องยังถูกตรวจเจอ(self, text):
+        assert detect_forget_all(text) is True, text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # "เคย" ต้องติดคำกริยาจริงถึงจะกัน — เคสที่เคยใช้ทดสอบข้อนี้
+            # ("ใช่ ผมเคยขอให้ลบความจำไปแล้วนี่") ผ่านเพราะไปตกสาขาขอลบซ้ำ
+            # ไม่ใช่เพราะยามนี้ทำงาน คำว่า "เคย" จึงไม่เคยถูกทดสอบเลย
+            "ผมเคยลบความจำไปแล้ว",
+            "เมื่อวานเคยลบความจำไปแล้ว",
+        ],
+    )
+    def test_เล่าเรื่องอดีตต้องไม่ใช่คำสั่งลบ(self, text):
+        assert detect_forget_all(text) is False, text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "please don't delete my memory",
+            "do not delete my data",
+            "never delete my memory",
+            "I won't delete my memory",
+            "no need to delete my memory",
+        ],
+    )
+    def test_ประโยคห้ามลบภาษาอังกฤษต้องไม่ใช่คำสั่ง(self, text):
+        """บัญชีคำปฏิเสธเป็นภาษาไทยล้วน แต่ถูกใช้กับคำสั่งอังกฤษด้วย
+
+        ผู้ใช้ที่ตอบรับว่า "ตกลงครับ" (รับทราบว่าจะ *ไม่* ลบ) จึงทำให้ข้อมูล
+        หายถาวรใน 2 เทิร์น — ช่องเดียวกับฝั่งไทยที่อุดไปแล้ว
+        """
+        assert detect_forget_all(text) is False, text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "delete my memory",
+            "forget everything about me",
+            "erase my data please",
+            "I don't want it anymore, delete my memory",
+        ],
+    )
+    def test_คำสั่งลบภาษาอังกฤษจริงต้องยังทำงาน(self, text):
         assert detect_forget_all(text) is True, text

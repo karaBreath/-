@@ -63,6 +63,16 @@ _MEMORY_OBJECT = (
     r")"
 )
 _FORGET_INTENT = re.compile(_FORGET_VERB + r".{0,10}?" + _MEMORY_OBJECT)
+# คำปฏิเสธฝั่งอังกฤษ — บัญชีไทยข้างบนใช้กับ _FORGET_EN ไม่ได้
+#
+# ประโยคห้ามลบภาษาอังกฤษจึงถูกอ่านเป็นคำสั่งลบ ("please don't delete my
+# memory") แล้วผู้ใช้ที่ตอบรับว่า "ตกลงครับ" (รับทราบว่าจะ *ไม่* ลบ)
+# ก็ทำให้ข้อมูลหายถาวรใน 2 เทิร์น — ช่องเดียวกับฝั่งไทยที่เพิ่งอุดไป
+_NEGATOR_BEFORE_EN = re.compile(
+    r"(?:do\s*n[\u2019']?t|does\s*n[\u2019']?t|did\s*n[\u2019']?t"
+    r"|won[\u2019']?t|can[\u2019']?t|cannot|never|no need to|not)\s+$",
+    re.IGNORECASE,
+)
 _FORGET_EN = re.compile(
     r"\b(?:forget everything|delete my (?:data|memory)|erase my (?:data|memory))\b",
     re.IGNORECASE,
@@ -216,7 +226,8 @@ def detect_forget_all(text: str) -> bool:
     match = _FORGET_INTENT.search(text) or _FORGET_EN.search(text)
     if match is None:
         return False
-    if _NEGATOR_BEFORE.search(text[: match.start()]):
+    before = text[: match.start()]
+    if _NEGATOR_BEFORE.search(before) or _NEGATOR_BEFORE_EN.search(before):
         return False
     return True
 

@@ -816,3 +816,35 @@ class Testคำขอต้องไม่กว้างจนกินชื�
     )
     def test_คำสั่งต้องยังถูกปฏิเสธ(self, text):
         assert extract_name_claim(text, expecting_name=True) is None, text
+
+
+class Testคำลงท้ายสั่งการต้องเทียบที่ท้ายประโยค:
+    """"ซิ"/"สิ" เป็นพยางค์ของชื่อไทยจำนวนมาก การเทียบแบบสตริงย่อยกินชื่อจริง
+
+    "สิ" พบในชื่อไทยบ่อยกว่า "ที" เสียอีก
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "สิริ", "ประสิทธิ์", "สิงห์", "ซินดี้", "สิรินทร์", "สิทธิ์",
+            "สิริพร", "วสิษฐ์", "สิรภพ", "ประทีป", "ทีปกร",
+        ],
+    )
+    def test_ชื่อที่มีพยางค์สิหรือซีต้องใช้ได้(self, name):
+        assert extract_name_claim(f"เรียก{name}ก็ได้ค่ะ", expecting_name=True) == name
+        assert extract_name_claim(f"หนูชื่อ{name}ค่ะ") == name
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "เรียกช่างมาซิ",
+            "เรียกหมอมาสิ",
+            "เรียกช่างมาเถอะ",
+            "เรียกหมอมาที",
+            "เรียกแท็กซี่ให้หน่อย",
+            "เรียกรถพยาบาลด่วน",
+        ],
+    )
+    def test_คำสั่งที่ลงท้ายด้วยคำสั่งการต้องถูกปฏิเสธ(self, text):
+        assert extract_name_claim(text, expecting_name=True) is None, text
