@@ -281,7 +281,18 @@ export class FakeSpeechSynthesis {
       spoken,
       cancelled: 0,
       getVoices: () => [],
-      addEventListener() {},
+      listeners: [],
+      addEventListener(type, handler) {
+        // เบราว์เซอร์จริงกันตัวจัดการซ้ำให้เอง ของปลอมก็ต้องทำเหมือนกัน
+        if (!this.listeners.some((l) => l.type === type && l.handler === handler)) {
+          this.listeners.push({ type, handler });
+        }
+      },
+      removeEventListener(type, handler) {
+        this.listeners = this.listeners.filter(
+          (l) => !(l.type === type && l.handler === handler),
+        );
+      },
       speak(utterance) {
         spoken.push(utterance);
       },

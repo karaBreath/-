@@ -382,7 +382,25 @@ export class ThaiSpeechSynthesis {
   ) {
     this.pickVoice();
     // รายชื่อเสียงในบางเบราว์เซอร์โหลดแบบ asynchronous
-    globalThis.speechSynthesis?.addEventListener?.("voiceschanged", () => this.pickVoice());
+    globalThis.speechSynthesis?.addEventListener?.("voiceschanged", this.onVoices);
+  }
+
+  /**
+   * ต้องเก็บอ้างอิงไว้ถอดทีหลัง
+   *
+   * หน้าเว็บสร้าง VoiceConversation ใหม่ทุกครั้งที่กด "เริ่มคุย" ถ้าไม่ถอด
+   * ตัวจัดการออก มันจะสะสมขึ้นเรื่อย ๆ ตัวละหนึ่งอ็อบเจ็กต์ที่ตายแล้ว
+   */
+  private readonly onVoices = (): void => this.pickVoice();
+
+  /** ผูกตัวจัดการอีกครั้ง — เรียกซ้ำได้ addEventListener กันซ้ำให้เอง */
+  listen(): void {
+    globalThis.speechSynthesis?.addEventListener?.("voiceschanged", this.onVoices);
+  }
+
+  /** ถอดตัวจัดการที่ผูกกับ global ออก */
+  dispose(): void {
+    globalThis.speechSynthesis?.removeEventListener?.("voiceschanged", this.onVoices);
   }
 
   get available(): boolean {
@@ -572,6 +590,8 @@ export class VoiceConversation {
   /**
    * เพิ่มขึ้นทุกครั้งที่บทสนทนาถูกปิด
    *
+   * เลื่อนทั้งตอนเริ่มและตอนปิด
+   *
    * งาน asynchronous ที่ค้างอยู่ตอนผู้ใช้กด "หยุด" ไม่มีทางรู้ว่าบทสนทนาจบไป
    * แล้ว มันจึงทำงานต่อจนจบ: เปิด socket ใหม่ (ที่ไม่มีใครปิดอีกเลย) ส่งเสียง
    * และข้อความของผู้ใช้ออกไป *หลัง* กดหยุด แล้วคำตอบของเทิร์นเก่าก็ไปโผล่เป็น
@@ -605,6 +625,11 @@ export class VoiceConversation {
     if (this.running || this.starting) return;
     this.starting = true;
     this.recognitionFatal = false;
+    // เลื่อนรุ่นตอน *เริ่ม* ด้วย ไม่ใช่แค่ตอนปิด — ไม่งั้นหางของ cleanup ที่ยัง
+    // ค้างอยู่ (รอปิดไมโครโฟน) จะเห็นรุ่นเดิม แล้วรื้อบทสนทนาใหม่ที่เพิ่งเริ่มทิ้ง
+    this.generation += 1;
+    // cleanup ถอดตัวจัดการ voiceschanged ออก ต้องผูกกลับเมื่อเริ่มใหม่
+    this.synth.listen();
     const generation = this.generation;
 
     try {
@@ -678,9 +703,15 @@ export class VoiceConversation {
         // ทันที วนประมาณเก้าร้อยรอบต่อวินาทีตลอดไป หน้าเว็บที่ต่อ onError
         // เข้ากับการเพิ่ม DOM node จะบวมจนค้าง
         this.recognitionFatal = true;
-        // อย่าบอกว่า "กำลังฟัง" ทับ recognizer ที่ตายแล้ว
-        this.setState("idle");
-        this.options.onError?.(new Error(FATAL_RECOGNITION_MESSAGES[code] ?? code));
+        // ปิดบทสนทนาให้จริง ๆ ไม่ใช่แค่เปลี่ยนป้ายสถานะ
+        //
+        // ของเดิมตั้งเป็น "ปิดอยู่" แต่ปล่อย running เป็น true ไมโครโฟนและ
+        // AudioContext ยังเปิดค้าง (ไฟไมค์ในเบราว์เซอร์ยังติด) และ start()
+        // ก็ไม่ทำอะไรเพราะติดเงื่อนไข running — ผู้ใช้ทำตามที่ข้อความบอกไม่ได้
+        const message = FATAL_RECOGNITION_MESSAGES[code] ?? code;
+        void this.cleanup().finally(() => {
+          this.options.onError?.(new Error(message));
+        });
         return;
       }
       this.options.onError?.(new Error(`ถอดเสียงผิดพลาด: ${code}`));
@@ -752,7 +783,13 @@ export class VoiceConversation {
     const interrupted = this.pending.find((turn) => !turn.abandoned);
     if (interrupted) {
       interrupted.abandoned = true;
-      if (interrupted.reply) this.options.onReply?.(interrupted.reply);
+      // onReply ของผู้เรียกโยนได้ — ถ้าไม่ครอบ เทิร์นที่เหลือจะไม่ถูกรับกลับ
+      // เข้าคิวเสียง และไมโครโฟนก็ไม่ถูกเปิดกลับมา
+      try {
+        if (interrupted.reply) this.options.onReply?.(interrupted.reply);
+      } catch (error) {
+        this.reportLater(error);
+      }
     }
     // stop() ล้างเทิร์นที่รับได้ทั้งหมด ต้องรับเทิร์นที่ยังไม่ถูกยกเลิกกลับเข้ามา
     // ไม่งั้นประโยคที่ผู้ใช้พูดต่อจากการพูดแทรกจะเงียบสนิทตลอดไป
@@ -761,11 +798,16 @@ export class VoiceConversation {
       this.audio.accept(turn.id);
       this.synth.accept(turn.id);
     }
-    this.setState("listening");
-    // ของเดิมบอกว่า "กำลังฟัง" แต่ไม่เคยเปิดไมค์กลับมา ในโหมดไม่พูดแทรก
-    // submit พักไมค์ไว้ และเทิร์นที่ถูกยกเลิกยังค้างใน pending ทำให้
-    // maybeFinish ก็ไม่ทำงาน ไมค์จึงปิดอยู่จนกว่าเซิร์ฟเวอร์จะส่ง done มา
-    this.resumeRecognition();
+    // เปิดไมค์กลับมาเฉพาะเมื่อไม่มีเทิร์นอื่นรออยู่
+    //
+    // ของเดิมบอกว่า "กำลังฟัง" แต่ไม่เคยเปิดไมค์กลับมาเลย พอแก้ให้เปิดเสมอ
+    // ก็เปิดผิดจังหวะแทน: เทิร์นอื่นที่ยังไม่ถูกยกเลิกจะเล่นเสียงตามมาอีก
+    // ไม่กี่ชั่วขณะ แล้วไมค์ที่เปิดอยู่ก็ได้ยินเสียงบอทเอง ถอดเป็นข้อความ
+    // แล้วส่งกลับไปเป็นเทิร์นใหม่ — ลูปคุยกับตัวเองที่การพักไมค์มีไว้เพื่อกัน
+    if (this.pending.every((turn) => turn.abandoned)) {
+      this.setState("listening");
+      this.resumeRecognition();
+    }
   }
 
   /** หยุดบทสนทนาทั้งหมด */
@@ -791,11 +833,19 @@ export class VoiceConversation {
       recognition.onend = null;
       recognition.abort();
     }
+    const generation = this.generation;
     const recorder = this.recorder;
     this.recorder = null;
     await recorder?.stop();
+    if (generation !== this.generation) {
+      // ผู้ใช้กดเริ่มใหม่ระหว่างที่เรารอปิดไมโครโฟน ทุกอย่างข้างล่างเป็นของ
+      // บทสนทนาใหม่แล้ว การรื้อต่อจะปิด socket และตั้งสถานะเป็น "ปิดอยู่"
+      // ทับบทสนทนาที่กำลังทำงาน
+      return;
+    }
     this.audio.stop();
     this.synth.stop();
+    this.synth.dispose();
     this.stream?.close();
     this.stream = null;
     this.streamReady = null;
@@ -849,10 +899,15 @@ export class VoiceConversation {
       this.synth.discard(turn);
       this.setState("listening");
     } finally {
-      this.awaitingDirect = Math.max(0, this.awaitingDirect - 1);
-      // ต้องปลุก maybeFinish เอง ไม่งั้นเทิร์นที่ถูก awaitingDirect กั้นไว้
-      // จะไม่มีใครมาปิดให้ ไมโครโฟนที่ถูกพักไว้ก็ไม่ถูกเปิดกลับมาเลย
-      this.maybeFinish();
+      // ลดตัวนับเฉพาะเมื่อยังเป็นบทสนทนาเดิม ไม่งั้นเทิร์นเก่าจะไปลดตัวนับ
+      // ของบทสนทนาใหม่จนถึงศูนย์ แล้ว maybeFinish จะล้างหมายเลขเทิร์นที่
+      // กำลังรอคำตอบอยู่ทิ้ง เสียงของเทิร์นนั้นเลยหายไปเงียบ ๆ
+      if (generation === this.generation) {
+        this.awaitingDirect = Math.max(0, this.awaitingDirect - 1);
+        // ต้องปลุก maybeFinish เอง ไม่งั้นเทิร์นที่ถูก awaitingDirect กั้นไว้
+        // จะไม่มีใครมาปิดให้ ไมโครโฟนที่ถูกพักไว้ก็ไม่ถูกเปิดกลับมาเลย
+        this.maybeFinish();
+      }
     }
   }
 
@@ -930,10 +985,15 @@ export class VoiceConversation {
       const entry = this.pending.find((item) => item.id === turn);
       if (entry) entry.stream = stream;
     } catch (error) {
-      this.options.onError?.(error as Error);
-      // ทิ้งเฉพาะเทิร์นนี้ ของเดิมล้าง pending ทั้งกอง เทิร์นก่อนหน้าที่กำลัง
-      // คุยอยู่ดี ๆ จึงถูกลบไปด้วยเพราะประโยคใหม่ส่งไม่สำเร็จ
-      this.dropTurn(turn);
+      // dropTurn ต้องทำงานเสมอ แม้ onError ของผู้เรียกจะโยน ไม่งั้นเทิร์นที่
+      // ตายแล้วจะค้างในคิว แล้วดูดคำตอบของประโยคถัดไปไปทั้งหมด
+      try {
+        this.options.onError?.(error as Error);
+      } finally {
+        // ทิ้งเฉพาะเทิร์นนี้ ของเดิมล้าง pending ทั้งกอง เทิร์นก่อนหน้าที่กำลัง
+        // คุยอยู่ดี ๆ จึงถูกลบไปด้วยเพราะประโยคใหม่ส่งไม่สำเร็จ
+        this.dropTurn(turn);
+      }
     }
   }
 
@@ -1006,15 +1066,22 @@ export class VoiceConversation {
       try {
         // การจับมือที่ค้างไม่จบ (proxy ค้าง TCP ครึ่งตาย) ทำให้ทุกประโยค
         // หลังจากนั้นรอเงียบ ๆ ตลอดไป ไม่มี error ไม่มีอะไรเลย
-        await Promise.race([
-          connection.ready,
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("เชื่อมต่อไม่สำเร็จ ลองใหม่อีกครั้ง")),
-              this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
-            ),
-          ),
-        ]);
+        // ต้องยกเลิกตัวจับเวลาเสมอ ไม่งั้นทุกครั้งที่ต่อจะทิ้ง timer สิบวินาที
+        // ค้างไว้ตัวหนึ่ง การต่อใหม่บ่อย ๆ จะสะสมขึ้นเรื่อย ๆ
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            connection.ready,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("เชื่อมต่อไม่สำเร็จ ลองใหม่อีกครั้ง")),
+                this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
       } catch (error) {
         if (this.stream === connection) this.stream = null;
         this.streamReady = null;
@@ -1098,6 +1165,18 @@ export class VoiceConversation {
     }
   }
 
+  /**
+   * โยน error ของตัวจัดการผู้เรียกออกไปทีหลัง โดยไม่ให้ล้มขั้นตอนที่เหลือ
+   *
+   * ตัวจัดการที่โยนต้องไม่ถูกกลืน (ผู้เรียกควรได้เห็น) แต่ก็ต้องไม่ทำให้
+   * สถานะภายในค้างกลางคัน จึงเลื่อนไปโยนใน macrotask แยก
+   */
+  private reportLater(error: unknown): void {
+    setTimeout(() => {
+      throw error;
+    }, 0);
+  }
+
   private onPlaybackIdle(): void {
     this.maybeFinish();
   }
@@ -1144,8 +1223,13 @@ export class VoiceConversation {
       this.audio.discard(turn.id);
       this.synth.discard(turn.id);
     }
-    if (message) this.options.onError?.(new Error(message));
-    this.maybeFinish();
+    // ตัวจัดการของผู้เรียกโยนได้ — ถ้าไม่ครอบไว้ maybeFinish จะไม่ทำงาน
+    // สถานะค้างที่ "กำลังคิด" และไมโครโฟนไม่เปิดกลับมาเลย
+    try {
+      if (message) this.options.onError?.(new Error(message));
+    } finally {
+      this.maybeFinish();
+    }
   }
 
   private finishTurn(): void {
