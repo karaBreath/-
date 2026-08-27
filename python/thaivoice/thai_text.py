@@ -123,7 +123,11 @@ _SYMBOL_UNITS = [
 # "฿500" คือ "ห้าร้อยบาท" ไม่ใช่ "บาทห้าร้อย"
 _CURRENCY = {"฿": "บาท", "$": "ดอลลาร์", "€": "ยูโร", "£": "ปอนด์", "¥": "เยน"}
 _CURRENCY_CLASS = "[" + "".join(re.escape(c) for c in _CURRENCY) + "]"
-_AMOUNT = r"\d[\d,]*(?:\.\d+)?"
+# จำกัดความยาวไว้ เพราะ \d[\d,]* ที่ไม่มีเพดานทำให้ทุกตำแหน่งเริ่มต้นกินตัวเลข
+# ทั้งพรืดแล้วถอยกลับหาสัญลักษณ์สกุลเงิน — สตริงตัวเลข 8,000 หลักใช้เวลา 1.7
+# วินาที และ 50,000 หลักใช้ 66 วินาที เส้นทางหลักตัดเป็นท่อนสั้นอยู่แล้วจึงยัง
+# ไม่ระเบิด แต่ tts.py รับข้อความอะไรก็ได้ที่ผู้เรียกส่งมา
+_AMOUNT = r"\d[\d,]{0,24}(?:\.\d{1,8})?"
 _CURRENCY_BEFORE = re.compile(rf"({_CURRENCY_CLASS})\s*({_AMOUNT})")
 _CURRENCY_AFTER = re.compile(rf"({_AMOUNT})\s*({_CURRENCY_CLASS})")
 
@@ -158,6 +162,8 @@ _PER_UNITS = (
     # ตั้งใจไม่ใส่ "ที่" — ลงท้ายคำนามไทยเยอะเกินไป (สถานที่ ทุกที่ ที่ไหน)
     # "ระบุสถานที่/เวลานัดหมาย" กลายเป็น "สถานที่ ต่อ เวลา" ทันที
     "เปอร์เซ็นต์", "%", "องศา", "ขวด", "กล่อง", "ถุง", "แผ่น",
+    # หน่วยละตินต้องอยู่ด้วย — รอบแรกทำงานก่อนการขยายตัวย่อละติน
+    "mAh", "mg", "ml", "mL", "kg", "km", "cm", "kWh",
 )
 # ต้องมี *จำนวน* กำกับอยู่ก่อนหน้าหน่วย
 #
@@ -240,6 +246,7 @@ def clean_for_speech(text: str, expand_numbers: bool = True) -> str:
     # ด้วยอักษรไทยผิดสองทาง: เลขไทยอยู่ในช่วง [ก-๙] ด้วย "บ้านเลขที่ ๙๙/๑"
     # จึงกลายเป็น "เก้าสิบเก้าต่อหนึ่ง" และ "/" ที่แปลว่า "หรือ" ก็โดนด้วย
     # ("ชาย/หญิง" -> "ชายต่อหญิง")
+    s = _DOC_NUMBER_SLASH.sub(lambda m: f"{m.group(1)} ทับ {m.group(2)}", s)
     s = _UNIT_PER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)} ต่อ ", s)
     # TTS ส่วนใหญ่ข้าม "ฯลฯ" ไปเฉย ๆ หรืออ่านเป็นพยางค์
     s = s.replace("ฯลฯ", " และอื่น ๆ ")
@@ -248,6 +255,10 @@ def clean_for_speech(text: str, expand_numbers: bool = True) -> str:
     s = _MONTH_ABBR_RE.sub(lambda m: f" {_MONTH_ABBR[m.group(0)]} ", s)
     s = _THAI_UNIT_RE.sub(lambda m: f" {_THAI_UNIT_ABBR[m.group(2)]} ", s)
     s = _ERA_RE.sub(lambda m: f" {_ERA_ABBR[m.group(0)]} ", s)
+    # รันกฎ "ต่อ" อีกรอบหลังแปลงตัวย่อ — รายการหน่วยมี "บาท" แต่ไม่มี "บ."
+    # และมี "ชม." แต่ไม่มี mAh พอ "บ." ถูกแปลงเป็น "บาท" ทีหลัง กฎก็ผ่านไปแล้ว
+    # "38.50 บ./ลิตร" จึงเหลือ "/" ดิบ ๆ ให้ TTS แล้ว "ต่อ" หายทั้งคำ
+    s = _UNIT_PER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)} ต่อ ", s)
 
     # แปลงสัญลักษณ์ที่มีความหมายก่อน แล้วค่อยกรองสัญลักษณ์ที่เหลือทิ้ง
     for symbol, spoken in _SYMBOL_UNITS:
@@ -534,6 +545,18 @@ _ID_CONTEXT = re.compile(
 # วันที่แบบ 15/8/2568 — เครื่องหมายทับอ่านออกเสียงไม่ได้
 _SLASH_DATE = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})/(\d{4})(?![\w/])")
 
+# วันที่แบบปีสองหลัก ("15/8/68") — รูปที่คนไทยเขียนบ่อยที่สุดรูปหนึ่ง
+# ตรวจความสมเหตุสมผลของวันและเดือนในฟังก์ชัน ไม่ใช่ใน regex
+_SLASH_DATE_SHORT = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})/(\d{2})(?![\w/])")
+
+# วันที่แบบ ISO ("2568-08-15") — ขีดกลางเคยค้างอยู่ทั้งสองตัวเพราะตัวจับช่วง
+# มี lookahead กันขีดถัดไป TTS กลืนขีดหาย เหลือตัวเลขติดกันหมดความหมาย
+_ISO_DATE = re.compile(r"(?<![\w-])(\d{4})-(\d{2})-(\d{2})(?![\w-])")
+
+# เลขที่หนังสือราชการ ("ศธ 0506/ว 123") — อ่านว่า "ทับ"
+# ต้องแยกจากกฎเลข/เลข เพราะข้างหลังทับเป็นอักษรไทยตัวเดียว
+_DOC_NUMBER_SLASH = re.compile(r"(?<![\w/])(\d{2,5})/([ก-ฮ])(?![ก-๙])")
+
 _THAI_MONTHS = (
     "", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
     "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
@@ -704,6 +727,25 @@ def _speak_phone(match: re.Match[str], id_context: bool = False) -> str:
     return read_digits(digits) if long_enough and looks_like_phone else raw
 
 
+def _speak_short_date(match: re.Match[str]) -> str:
+    """วันที่ปีสองหลัก ("15/8/68") — ปีอ่านทีละหลักอย่างที่คนไทยพูดจริง"""
+    day, month = int(match.group(1)), int(match.group(2))
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        return match.group(0)
+    year = " ".join(_DIGITS[int(d)] for d in match.group(3))
+    return f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} {year}"
+
+
+def _speak_iso_date(match: re.Match[str]) -> str:
+    year, month, day = (int(g) for g in match.groups())
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        return match.group(0)
+    return (
+        f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} "
+        f"{thai_number_to_words(year)}"
+    )
+
+
 def _speak_date(match: re.Match[str]) -> str:
     day, month, year = (int(g) for g in match.groups())
     if not 1 <= month <= 12:
@@ -733,6 +775,8 @@ def expand_numbers_for_speech(text: str) -> str:
     'ราคา หนึ่งพันสองร้อยสามสิบสี่ บาท'
     """
     text = _SLASH_DATE.sub(_speak_date, text)
+    text = _ISO_DATE.sub(_speak_iso_date, text)
+    text = _SLASH_DATE_SHORT.sub(_speak_short_date, text)
 
     def time_range(match: re.Match[str]) -> str:
         as_range = (

@@ -748,3 +748,26 @@ class Testห้ามสกัดความจำระหว่างรอ�
 
         เนื้อหา = [t.content for t in store.recent_turns(speaker.id) if t.role == "assistant"]
         assert any("ยังไม่ได้ลบ" in c for c in เนื้อหา), เนื้อหา
+
+
+class Testคำยืนยันต้องไม่ขัดกับคำตอบตอนลบจริง:
+    def test_ไม่บอกจำนวนข้อความตอนถามยืนยัน(self, session, store):
+        """ตัวเลขนี้อ่านจากสถิติ *ก่อน* เทิร์นคำขอกับคำตอบจะถูกบันทึกลงไป
+
+        ผู้ใช้จึงได้ยินจำนวนหนึ่งตอนถาม แล้วอีกจำนวนหนึ่งตอนลบจริง
+        """
+        speaker = session.register_speaker("มาลี")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        for i in range(3):
+            store.record_turn(speaker.id, "s", "user", f"ข้อความที่ {i}")
+
+        ถาม = session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False).reply
+        ลบ = session.exchange("ยืนยัน", speaker=speaker, speak=False).reply
+
+        assert "บทสนทนาที่คุยกันมา" in ถาม, ถาม
+        assert "อีกหนึ่ง" not in ถาม, ถาม
+        # ตัวเลขที่ปรากฏตอนลบจริงต้องไม่เคยถูกอ้างไว้ตอนถามให้ขัดกัน
+        import re as _re
+
+        assert not _re.search(r"\d+ ข้อความ", ถาม), ถาม
+        assert "เรียบร้อยแล้ว" in ลบ, ลบ
