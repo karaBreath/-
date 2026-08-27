@@ -826,3 +826,63 @@ class Testคำยืนยันต้องพูดถึงเฉพาะ�
 
         เนื้อหา = [t.content for t in store.recent_turns(speaker.id) if t.role == "assistant"]
         assert any("ยังไม่ได้ลบ" in c for c in เนื้อหา), เนื้อหา
+
+
+class Testโปรไฟล์ที่ถูกลบต้องไม่ไหลกลับเข้า_prompt:
+    def test_ชื่อเล่นที่ถูกลบต้องไม่อยู่ใน_prompt_เทิร์นถัดไป(self, session, store):
+        """อ็อบเจกต์ผู้พูดที่ค้างในหน่วยความจำเป็นภาพนิ่งของตอนระบุตัวตนได้
+
+        เมื่อ "ลบความจำทั้งหมด" ล้างชื่อเล่นในฐานข้อมูล ภาพนิ่งนั้นยังถือค่าเก่า
+        แล้วไหลกลับเข้า prompt ทุกเทิร์นที่เหลือ ผู้ใช้ได้ยินว่าลบแล้วแต่บอท
+        ยังเรียกเขาด้วยชื่อเล่นเดิมทั้ง session
+        """
+        speaker = session.register_speaker("สมชาย")
+        store.update_speaker(speaker.id, nickname="ตั้ม", gender="male", particle="ครับ")
+        session.current_speaker = store.get_speaker(speaker.id)
+        store.upsert_fact(speaker.id, "อาชีพ", "ครู")
+
+        session.exchange("ลบความจำทั้งหมด", speak=False)
+        session.exchange("ยืนยัน", speak=False)
+        session.exchange("สวัสดี", speak=False)
+
+        ส่งไป = str(session.brain.client.calls[-1].get("system", ""))
+        assert "ตั้ม" not in ส่งไป, ส่งไป
+
+
+class Testคำยืนยันที่ย้ำคำขอลบ:
+    """ด่านตอบรับยึดทั้งต้นและท้ายประโยคโดยตั้งใจ เพราะเป็นด่านสุดท้ายก่อนลบถาวร
+
+    แต่ประโยคที่ตอบรับ *และ* ย้ำคำขอในประโยคเดียวมีหลักฐานสองชั้น ไม่ใช่น้อยกว่า
+    การให้มันตกไปเป็น "ตอบไม่ชัด" ทำให้ผู้ใช้วนอยู่กับคำถามยืนยันไม่จบ
+    """
+
+    @pytest.mark.parametrize(
+        "phrase",
+        ["ยืนยันครับ ลบความจำได้เลย", "ใช่ ลบความจำเลย", "เอาเลยครับ ลบความจำ"],
+    )
+    def test_ตอบรับพร้อมย้ำคำขอต้องลบจริง(self, session, store, phrase):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange(phrase, speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id) == [], phrase
+
+    @pytest.mark.parametrize(
+        "phrase", ["ไม่ ยังไม่ลบความจำ", "ไม่ต้องลบความจำนะ", "ลบความจำทั้งหมด"]
+    )
+    def test_ประโยคที่ไม่ใช่การตอบรับต้องไม่ลบ(self, session, store, phrase):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange(phrase, speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id), phrase
+
+    def test_ขอลบซ้ำหลายครั้งแล้วยืนยันต้องลบได้(self, session, store):
+        """ทางออกของลูปต้องไม่หายไป"""
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        for _ in range(4):
+            session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id), "ยังไม่ยืนยันต้องไม่ลบ"
+        session.exchange("ยืนยัน", speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id) == []

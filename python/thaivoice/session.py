@@ -177,6 +177,19 @@ _AFFIRMATIVE = re.compile(
     re.IGNORECASE,
 )
 
+# คำตอบรับที่ขึ้นต้นประโยค — ใช้ *เฉพาะ* คู่กับคำขอลบที่พูดซ้ำในประโยคเดียวกัน
+#
+# ด่านหลักข้างบนยึดทั้งต้นและท้ายประโยคโดยตั้งใจ เพราะเป็นด่านสุดท้ายก่อนลบ
+# ข้อมูลถาวร แต่ประโยคอย่าง "ยืนยันครับ ลบความจำได้เลย" จึงไม่ผ่าน แล้วผู้ใช้
+# วนอยู่กับคำถามยืนยันไม่จบ ทั้งที่พูดชัดกว่าคำว่า "ยืนยัน" เปล่า ๆ เสียอีก
+# เมื่อมีทั้งคำตอบรับขึ้นต้น *และ* คำขอลบในประโยคเดียว หลักฐานมีสองชั้น
+# ไม่ใช่น้อยกว่าเดิม
+_AFFIRMATIVE_START = re.compile(
+    r"^\s*(?:ใช่|ยืนยัน|ลบเลย|ลบได้เลย|เอาเลย|เอาสิ|ตกลง|โอเค|โอเก|จัดไป|"
+    r"แน่ใจ|ได้เลย|ทำเลย|จัดการเลย|ลุยเลย|yes|yeah|yep|ok|okay|confirm|sure)",
+    re.IGNORECASE,
+)
+
 # คำ "ปฏิเสธ" จับแค่ขึ้นต้นก็พอ เพราะการเข้าใจผิดว่าปฏิเสธแปลว่าไม่ลบ
 # ซึ่งเป็นทางที่ปลอดภัยกว่าเสมอ
 _NEGATIVE = re.compile(
@@ -426,19 +439,28 @@ class ConversationSession:
         return ident
 
     def _live_current_speaker(self) -> Speaker | None:
-        """คนปัจจุบันที่ยัง *มีอยู่จริง* ในฐานข้อมูล
+        """คนปัจจุบันตามที่ฐานข้อมูลบอก *ตอนนี้*
 
         ถ้าคนคนนั้นถูกลบไปแล้ว (เช่นผู้ใช้กดลบตัวเองแล้วคุยต่อ) การใช้ค่าเก่าค้าง
         จะทำให้บันทึกบทสนทนาชนกับ foreign key แล้วโยน error ออกไปเป็น 500
+
+        ต้อง *โหลดใหม่* ทุกครั้ง ไม่ใช่แค่เช็คว่ายังมีอยู่ไหม
+        อ็อบเจกต์ที่ค้างอยู่ในหน่วยความจำเป็นภาพนิ่งของตอนที่ระบุตัวตนได้
+        เมื่อ "ลบความจำทั้งหมด" ล้างชื่อเล่นและคำลงท้ายในฐานข้อมูล ภาพนิ่งนั้น
+        ยังถือค่าเก่าไว้ แล้วไหลกลับเข้า prompt ทุกเทิร์นที่เหลือ — ผู้ใช้ได้ยินว่า
+        "ลบเรียบร้อยแล้ว" แล้วบอทยังเรียกเขาด้วยชื่อเล่นที่เพิ่งลบไปทั้ง session
         """
         if self.current_speaker is None:
             return None
-        if not self.store.speaker_exists(self.current_speaker.id):
+        fresh = self.store.get_speaker(self.current_speaker.id)
+        if fresh is None:
             log.info("ผู้สนทนา %s ถูกลบไปแล้ว ล้างสถานะ", self.current_speaker.id)
             self._pending_forget.pop(self.current_speaker.id, None)
             self._forget_nudged.discard(self.current_speaker.id)
             self.current_speaker = None
-        return self.current_speaker
+            return None
+        self.current_speaker = fresh
+        return fresh
 
     def register_speaker(
         self,
@@ -619,15 +641,28 @@ class ConversationSession:
 
         # คนที่กำลังพูดมีคำขอค้างอยู่ไหม — คำขอของคนอื่นต้องไม่ถูกแตะ
         if speaker is not None and speaker.id in self._pending_forget:
+            answer = is_affirmative(transcript)
             # ขอลบซ้ำ = ยืนยันเจตนา ไม่ใช่ "ตอบไม่ชัด"
             #
-            # ของเดิมสาขานี้ทำงานก่อนเสมอ คำขอลบอันใหม่จึงถูกนับเป็นคำตอบที่ไม่ชัด
-            # แล้วไป *ยกเลิก* คำขอเดิม ซึ่งตรงข้ามกับที่ผู้ใช้เพิ่งขอ จากนั้นบอท
-            # ก็วนบอกให้พูดประโยคที่เขาเพิ่งพูดไป และ "ยืนยัน" หลังจากนั้นก็ไม่ลบ
-            # อะไรเลย เพราะไม่มีคำขอค้างอยู่แล้ว
-            if detect_forget_all(transcript):
+            # ของเดิมสาขา "ตอบไม่ชัด" ทำงานก่อนเสมอ คำขอลบอันใหม่จึงถูกนับเป็น
+            # คำตอบที่ไม่ชัด แล้วไป *ยกเลิก* คำขอเดิม ซึ่งตรงข้ามกับที่ผู้ใช้
+            # เพิ่งขอ จากนั้นบอทก็วนบอกให้พูดประโยคที่เขาเพิ่งพูดไป
+            #
+            # แต่ต้องตรวจ *หลัง* คำตอบรับ/ปฏิเสธ ไม่ใช่ก่อน — ประโยคอย่าง
+            # "ยืนยันครับ ลบความจำได้เลย" หรือ "ใช่ ลบความจำเลย" เข้าเงื่อนไข
+            # ทั้งสองอย่าง การให้คำขอซ้ำชนะทำให้คำยืนยันแบบนั้นไม่มีวันผ่าน
+            # ผู้ใช้ติดลูปถาวรและลบไม่ได้เลย
+            if (
+                answer is None
+                and detect_forget_all(transcript)
+                and _AFFIRMATIVE_START.search(transcript)
+                and not _NEGATIVE.search(transcript)
+            ):
+                # ตอบรับ *และ* ย้ำคำขอลบในประโยคเดียว — เจตนาชัดเจนกว่าคำว่า
+                # "ยืนยัน" เปล่า ๆ เสียอีก
+                answer = True
+            if answer is None and detect_forget_all(transcript):
                 self._pending_forget[speaker.id] = time.time()
-                self._forget_nudged.discard(speaker.id)
                 stats = self.store.stats(speaker.id)
                 return self._say(
                     f"ยังไม่ได้ลบนะ{_soft(particle)} ขอยืนยันอีกครั้ง{particle} "
@@ -638,7 +673,6 @@ class ConversationSession:
                     speak,
                     user_text=transcript,
                 )
-            answer = is_affirmative(transcript)
             if answer is True:
                 del self._pending_forget[speaker.id]
                 self._forget_nudged.discard(speaker.id)

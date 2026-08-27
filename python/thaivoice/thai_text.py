@@ -593,9 +593,10 @@ _SCORE_CONTEXT = re.compile(
 # "ได้คะแนนสอบระหว่าง 85-90 คะแนน" มีคำว่า "คะแนน" ก็จริง แต่ "ระหว่าง"
 # ชี้ชัดว่าเป็นช่วง การอ่านว่า "แปดสิบห้าต่อเก้าสิบ" เปลี่ยนความหมายเป็น
 # สกอร์การแข่งขันไปเลย
-# ตั้งใจไม่ใส่ "อยู่ที่" กับ "ช่วง" — ทั้งสองคำใช้บอกสกอร์ในภาษาไทยพอ ๆ กับ
-# ใช้บอกช่วง ("สกอร์ตอนนี้อยู่ที่ 2-1" คือสองต่อหนึ่ง ไม่ใช่สองถึงหนึ่ง)
-_RANGE_CONTEXT = re.compile(r"(?:ระหว่าง|ตั้งแต่|ประมาณ|ราว|เฉลี่ย|ราคา|อายุ)")
+# ตั้งใจไม่ใส่ "อยู่ที่" — ใช้บอกสกอร์พอ ๆ กับใช้บอกช่วง
+# ("สกอร์ตอนนี้อยู่ที่ 2-1" คือสองต่อหนึ่ง ไม่ใช่สองถึงหนึ่ง)
+# ส่วน "ช่วง" ไม่กำกวมเลย — ไม่มีใครพูดว่า "สกอร์ช่วง 2-1"
+_RANGE_CONTEXT = re.compile(r"(?:ระหว่าง|ตั้งแต่|ประมาณ|ราว|เฉลี่ย|ราคา|อายุ|ช่วง)")
 
 # ตัวเลขคั่นด้วยทับตั้งแต่สามตัวขึ้นไป
 _SLASH_CHAIN = re.compile(r"(?<![\w/])\d{1,5}(?:/\d{1,5}){2,}(?![\d\w/])")
@@ -618,6 +619,11 @@ _ORDINAL_CONTEXT = re.compile(
 _ADDRESS_CONTEXT = re.compile(
     r"(?:บ้านเลขที่|เลขที่|ที่อยู่|ห้อง|ชั้น|ซอย|ถนน|หมู่|อาคาร|ตึก|ยูนิต)"
 )
+# คำบอกวันที่ที่อยู่ *ติด* ตัวเลข ชนะบริบทที่อยู่ที่อยู่ไกลออกไป
+#
+# ยามบริบทที่อยู่มองย้อนหลัง 24 ตัวอักษรแบบดิบ ประโยคนัดหมายจริงจึงพังหมด
+# ("นัดประชุมที่ห้องใหญ่ วันที่ 12/5/45" มีคำว่า "ห้อง" อยู่ในหน้าต่าง)
+_DATE_CUE = re.compile(r"(?:วันที่|วัน|เมื่อ|ลงวันที่|ตั้งแต่|ถึง)\s*$")
 # วันที่แบบไม่มีปี ("วันที่ 5/12") — ต้องมีคำว่าวันที่/เดือนนำหน้าจึงจะแน่ใจ
 _SLASH_DAY_MONTH = re.compile(
     r"(?<=วันที่)\s*(\d{1,2})/(\d{1,2})(?![\d\w/])"
@@ -736,6 +742,15 @@ def _speak_phone(match: re.Match[str], id_context: bool = False) -> str:
     return read_digits(digits) if long_enough and looks_like_phone else raw
 
 
+def _looks_like_address(match: re.Match[str]) -> bool:
+    """เลขชุดนี้เป็นเลขที่บ้าน/ห้อง ไม่ใช่วันที่"""
+    window = match.string[max(0, match.start() - 24) : match.start()]
+    # คำบอกวันที่ที่อยู่ติดตัวเลขชนะเสมอ — มันเจาะจงกว่าคำบอกที่อยู่ที่อยู่ไกล
+    if _DATE_CUE.search(window):
+        return False
+    return bool(_ADDRESS_CONTEXT.search(window))
+
+
 def _speak_short_date(match: re.Match[str]) -> str:
     """วันที่ปีสองหลัก ("15/8/68") — ปีอ่านทีละหลักอย่างที่คนไทยพูดจริง"""
     day, month = int(match.group(1)), int(match.group(2))
@@ -743,7 +758,7 @@ def _speak_short_date(match: re.Match[str]) -> str:
         return match.group(0)
     # เลขที่บ้าน/ห้อง/ชั้น หน้าตาเหมือนวันที่ทุกประการ ("บ้านเลขที่ 12/5/45")
     # บริบทข้างหน้าเป็นสิ่งเดียวที่แยกออก ปล่อยให้กฎเลขคั่นทับอ่านว่า "ทับ"
-    if _ADDRESS_CONTEXT.search(match.string[max(0, match.start() - 24) : match.start()]):
+    if _looks_like_address(match):
         return match.group(0)
     year = " ".join(_DIGITS[int(d)] for d in match.group(3))
     return f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} {year}"
@@ -764,7 +779,7 @@ def _speak_date(match: re.Match[str]) -> str:
     if not 1 <= month <= 12:
         return match.group(0)
     # เช่นเดียวกับรูปปีสองหลัก — "เลขที่ 12/5/2545" คือเลขที่ ไม่ใช่วันที่
-    if _ADDRESS_CONTEXT.search(match.string[max(0, match.start() - 24) : match.start()]):
+    if _looks_like_address(match):
         return match.group(0)
     return (
         f"{thai_number_to_words(day)} {_THAI_MONTHS[month]} "
@@ -855,7 +870,16 @@ def expand_numbers_for_speech(text: str) -> str:
         window = text[max(0, match.start() - 20) : match.start()]
         # คำบอกช่วงชนะบริบทคะแนนเสมอ — "ระหว่าง"/"เฉลี่ย" ชัดกว่าการมีคำว่า
         # "คะแนน" อยู่ในประโยค
-        scored = _SCORE_CONTEXT.search(window) and not _RANGE_CONTEXT.search(window)
+        #
+        # และหน่วยที่ตามหลังชนะทุกอย่าง — สกอร์การแข่งขันไม่มีลักษณนามต่อท้าย
+        # ("ทีมชนะ 3-1" ไม่ใช่ "3-1 คะแนน") ส่วนช่วงปริมาณมีเสมอ นี่เป็น
+        # หลักฐานที่เชื่อถือได้กว่าคำที่อยู่ *ก่อน* เลข เพราะคำนำหน้าอย่าง
+        # "อยู่ที่" ใช้ได้ทั้งสองความหมาย
+        scored = (
+            _SCORE_CONTEXT.search(window)
+            and not _RANGE_CONTEXT.search(window)
+            and not _QUANTITY_UNIT.match(text[match.end() :])
+        )
         joiner = "ต่อ" if scored else "ถึง"
         # ศูนย์นำหน้าของวันที่ ("05-10 มิถุนายน") เป็นแค่การเติมให้เต็มหลัก
         # ไม่มีใครออกเสียง แต่ _speak_integer อ่านทุกเลขที่ขึ้นต้นด้วยศูนย์
