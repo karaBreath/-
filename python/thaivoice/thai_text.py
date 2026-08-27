@@ -1059,6 +1059,36 @@ def _merge_short(parts: list[str], min_chars: int) -> list[str]:
     return out
 
 
+# อักขระที่เขียน *ต่อท้าย* พยัญชนะและไม่มีทางขึ้นต้นท่อนได้
+#
+# ต่างจากวรรณยุกต์/สระบน-ล่างตรงที่ Unicode จัดพวกนี้เป็น Lo/Lm ไม่ใช่ Mn
+# การเช็คแค่หมวด Mn จึงพลาด "ะ" ไป แล้ว "ค่ะ" ท้ายประโยคถูกตัดเป็น "ค่" + "ะ"
+# ท่อนสุดท้ายที่ส่งเข้า TTS เหลือสระ "ะ" ตัวเดียว
+_TRAILING_MARKS = "ะำๅๆฯ"
+
+# อักขระที่นับเป็นส่วนหนึ่งของตัวเลขก้อนเดียวกัน
+_NUMERIC_RUN = "0123456789๐๑๒๓๔๕๖๗๘๙,."
+
+
+def _digit_safe_cut(text: str, index: int, floor: int = 1) -> int:
+    """เลื่อนจุดตัดถอยหลังจนไม่ขาดกลางตัวเลขก้อนเดียว
+
+    "3,099,400" ที่ถูกตัดเป็น "3,099,40" + "0" ไม่ได้แค่ฟังผิด — ตัวแปลงตัวเลข
+    มองไม่เห็นรูปที่มันรู้จักอีกต่อไป จุลภาคจึงหลุดไปถึง TTS ดิบ ๆ ผู้ใช้ได้ยิน
+    "สาม จุลภาค ศูนย์ เก้า เก้า จุลภาค สี่สิบ" แล้วต่อด้วย "ศูนย์" คนละท่อน
+    ยอดสามล้านเก้าหมื่นเก้าพันสี่ร้อยหายไปทั้งก้อน
+
+    ถ้าถอยแล้วเหลือท่อนสั้นกว่า ``floor`` แปลว่าตัวเลขก้อนนั้นยาวกว่าท่อนทั้งท่อน
+    ตัดตรงจุดเดิมดีกว่าไม่มีความคืบหน้าเลย
+    """
+    if index <= 0 or index >= len(text):
+        return index
+    i = index
+    while i > 0 and text[i - 1] in _NUMERIC_RUN and text[i] in _NUMERIC_RUN:
+        i -= 1
+    return i if i >= floor else index
+
+
 # ── ตัดท่อนแบบไม่ให้ขาดกลางคำ ───────────────────────────────────────────────
 def _cluster_safe_cut(text: str, index: int) -> int:
     """เลื่อนจุดตัดถอยหลังจนไม่ขาดกลางคลัสเตอร์อักขระไทย
@@ -1070,7 +1100,9 @@ def _cluster_safe_cut(text: str, index: int) -> int:
     if index <= 0 or index >= len(text):
         return index
     i = index
-    while i > 0 and unicodedata.category(text[i]) == "Mn":
+    while i > 0 and (
+        unicodedata.category(text[i]) == "Mn" or text[i] in _TRAILING_MARKS
+    ):
         i -= 1
     while i > 0 and text[i - 1] in _LEADING_VOWELS:
         i -= 1
@@ -1109,11 +1141,11 @@ def _word_safe_cut(text: str, low: int, high: int) -> int:
                 if position >= low:
                     best = position
             if best:
-                return best
+                return max(1, _digit_safe_cut(text, best))
         except Exception:
             pass
     # จุดตัดต้องมากกว่า 0 เสมอ ไม่งั้นผู้เรียกจะตัดข้อความไม่ออกและวนไม่จบ
-    return max(1, _cluster_safe_cut(text, high))
+    return max(1, _digit_safe_cut(text, _cluster_safe_cut(text, high)))
 
 
 class SpeechChunker:
@@ -1227,6 +1259,11 @@ class SpeechChunker:
             return space + 1
 
         # ไม่มีเว้นวรรคที่ใช้ได้ — บังคับตัดที่ขอบคำเมื่อยาวเกินไป
-        if len(buf) >= self.max_chars:
+        #
+        # ต้องเกิน ไม่ใช่เท่ากับ: ตัวช่วยกันตัดกลางคลัสเตอร์/กลางตัวเลขต้องมองเห็น
+        # อักขระ *ถัดจาก* จุดตัดอย่างน้อยหนึ่งตัวจึงจะรู้ว่าตัดตรงนั้นได้ไหม
+        # ตอนบัฟเฟอร์ยาวเท่ากับเพดานพอดียังไม่มีตัวถัดไปให้ดู มันจึงคืนจุดเดิม
+        # ทันทีโดยไม่ตรวจอะไรเลย flush() จัดการตอนจบสตรีมอยู่แล้ว
+        if len(buf) > self.max_chars:
             return _word_safe_cut(buf, self.min_chars, self.max_chars)
         return None
