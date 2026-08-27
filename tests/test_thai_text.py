@@ -1739,3 +1739,54 @@ class Testหน่วยที่ตามหลังชี้ขาดระ�
     def test_ไม่มีหน่วยตามหลังต้องอ่านว่าต่อ(self, text):
         got = clean_for_speech(text)
         assert "ต่อ" in got and "ถึง" not in got, got
+
+
+class Testคำว่าช่วงที่บอกเวลาไม่ใช่บอกช่วงตัวเลข:
+    """"ช่วงนี้/ช่วงหลัง/ช่วงเช้า" เป็นคำบอกเวลาที่ใช้ทั่วไป
+
+    ตัวตรวจมองย้อนหลัง 20 ตัวอักษร ไม่ใช่คำที่ติดกัน
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "ช่วงนี้สกอร์ออกมา 2-1 ตลอด",
+            "ทีมนี้ช่วงหลังชนะ 3-0 บ่อยมาก",
+            "ผลบอลช่วงเช้า 2-0 ครับ",
+            "ช่วงท้ายเกมแพ้ 1-2",
+        ],
+    )
+    def test_ช่วงที่บอกเวลาต้องไม่ทำให้สกอร์อ่านผิด(self, text):
+        got = clean_for_speech(text)
+        assert "ต่อ" in got and "ถึง" not in got, got
+
+    @pytest.mark.parametrize(
+        "text", ["ช่วงคะแนน 70-80 ถือว่าดีครับ", "ช่วงอายุ 20-30 ปี"]
+    )
+    def test_ช่วงที่บอกช่วงจริงต้องยังใช้ได้(self, text):
+        got = clean_for_speech(text)
+        assert "ถึง" in got and "ต่อ" not in got, got
+
+
+class Testสกอร์กีฬาที่นับเป็นคะแนน:
+    """"สกอร์ไม่มีลักษณนามต่อท้าย" ไม่จริงกับกีฬาที่นับเป็นคะแนน"""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "บาสนัดนี้ทีมเหย้าชนะ 98-95 คะแนน",
+            "วอลเลย์บอลชนะ 25-20 คะแนน",
+            "แพ้ไป 21-25 คะแนน",
+            "ทีมนำอยู่ 3-1 คะแนนครับ",
+        ],
+    )
+    def test_บริบทสกอร์ที่ชัดเจนต้องชนะหน่วยที่ตามหลัง(self, text):
+        got = clean_for_speech(text)
+        assert "ต่อ" in got and "ถึง" not in got, got
+
+    @pytest.mark.parametrize(
+        "text", ["คะแนนสอบอยู่ที่ 80-90 คะแนนครับ", "ได้คะแนนสอบระหว่าง 85-90 คะแนน"]
+    )
+    def test_คะแนนสอบยังอ่านเป็นช่วง(self, text):
+        got = clean_for_speech(text)
+        assert "ถึง" in got and "ต่อ" not in got, got

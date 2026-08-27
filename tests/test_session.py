@@ -849,18 +849,36 @@ class Testโปรไฟล์ที่ถูกลบต้องไม่ไ�
         assert "ตั้ม" not in ส่งไป, ส่งไป
 
 
-class Testคำยืนยันที่ย้ำคำขอลบ:
-    """ด่านตอบรับยึดทั้งต้นและท้ายประโยคโดยตั้งใจ เพราะเป็นด่านสุดท้ายก่อนลบถาวร
+class Testด่านยืนยันการลบต้องเข้มงวดจนยอมพลาด:
+    """ด่านสุดท้ายก่อนลบข้อมูลถาวรที่กู้คืนไม่ได้
 
-    แต่ประโยคที่ตอบรับ *และ* ย้ำคำขอในประโยคเดียวมีหลักฐานสองชั้น ไม่ใช่น้อยกว่า
-    การให้มันตกไปเป็น "ตอบไม่ชัด" ทำให้ผู้ใช้วนอยู่กับคำถามยืนยันไม่จบ
+    เคยมีสาขาที่ถือว่า "ประโยคขึ้นต้นด้วยคำตอบรับ *และ* มีคำขอลบอยู่ด้วย"
+    คือการยืนยัน โดยให้เหตุผลว่ามีหลักฐานสองชั้น — ผิด และอันตรายมาก
+    ทั้งสองตัวตรวจเป็นแบบ "มีคำนี้อยู่ที่ไหนสักแห่ง" ไม่ใช่โครงสร้างประโยค
+    ประโยคที่ผู้ใช้ *ห้าม* ลบจึงเข้าเงื่อนไขครบแล้วลบข้อมูลทิ้งทั้งหมด
     """
 
     @pytest.mark.parametrize(
         "phrase",
-        ["ยืนยันครับ ลบความจำได้เลย", "ใช่ ลบความจำเลย", "เอาเลยครับ ลบความจำ"],
+        [
+            "ยืนยันว่าไม่ลบความจำนะ",
+            "แน่ใจว่าไม่อยากลบความจำครับ",
+            "ok แต่ไม่ลบความจำนะ",
+            "โอเค เดี๋ยวค่อยลบความจำทีหลัง",
+            "ใช่ เมื่อวานผมลบความจำในมือถือไป",
+            "ใช่ ผมเคยขอให้ลบความจำไปแล้วนี่",
+            "ยืนยันการจองครับ ส่วนลบความจำไว้ก่อน",
+        ],
     )
-    def test_ตอบรับพร้อมย้ำคำขอต้องลบจริง(self, session, store, phrase):
+    def test_ประโยคที่ห้ามลบต้องไม่ลบ(self, session, store, phrase):
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange(phrase, speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id), phrase
+
+    @pytest.mark.parametrize("phrase", ["ยืนยัน", "ใช่", "ลบเลย", "โอเค"])
+    def test_คำยืนยันที่ชัดเจนต้องลบจริง(self, session, store, phrase):
         speaker = session.register_speaker("เดช")
         store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
         session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
@@ -886,3 +904,43 @@ class Testคำยืนยันที่ย้ำคำขอลบ:
         assert store.facts_for(speaker.id), "ยังไม่ยืนยันต้องไม่ลบ"
         session.exchange("ยืนยัน", speaker=speaker, speak=False)
         assert store.facts_for(speaker.id) == []
+
+    def test_ย้ำคำขอแล้วยังเตือนได้อีกครั้ง(self, session, store):
+        """คนที่ย้ำคำขอต้องไม่ได้ผ่อนผันน้อยกว่าคนที่ขอครั้งเดียว"""
+        speaker = session.register_speaker("เดช")
+        store.upsert_fact(speaker.id, "อาชีพ", "หมอ")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+        answer = session.exchange("แล้วพรุ่งนี้ล่ะ", speaker=speaker, speak=False)
+
+        assert "ยกเลิก" not in answer.reply, answer.reply
+        assert speaker.id in session._pending_forget
+        session.exchange("ยืนยัน", speaker=speaker, speak=False)
+        assert store.facts_for(speaker.id) == []
+
+
+class Testคำปฏิเสธที่อยู่ก่อนคำกริยา:
+    """"ไม่ลบความจำนะ" ต้องไม่ถูกอ่านเป็นคำสั่งลบตั้งแต่ต้นทาง
+
+    บัญชีคำปฏิเสธเดิมไม่มี "ไม่" เดี่ยว ๆ ทั้งที่เป็นรูปที่ใช้บ่อยที่สุด
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "ไม่ลบความจำนะ",
+            "ไม่อยากลบความจำครับ",
+            "เดี๋ยวค่อยลบความจำทีหลัง",
+            "ไม่ต้องลบความจำนะ",
+            "อย่าลบความจำ",
+        ],
+    )
+    def test_ประโยคปฏิเสธต้องไม่ใช่คำสั่งลบ(self, text):
+        assert detect_forget_all(text) is False, text
+
+    @pytest.mark.parametrize(
+        "text", ["ลบความจำทั้งหมด", "ลืมทุกอย่างเกี่ยวกับฉัน", "ลบความจำของผมเลย"]
+    )
+    def test_คำสั่งลบจริงต้องยังถูกตรวจเจอ(self, text):
+        assert detect_forget_all(text) is True, text

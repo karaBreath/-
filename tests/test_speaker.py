@@ -789,3 +789,30 @@ class Testสำนวนอธิบายต้องไม่แย่งต�
     )
     def test_การแนะนำตัวจริงต้องยังใช้ได้(self, text, expected):
         assert extract_name_claim(text) == expected
+
+
+class Testคำขอต้องไม่กว้างจนกินชื่อจริง:
+    """การเทียบแบบสตริงย่อยทำให้คำสั้นอย่าง "ที" กินพยางค์ของชื่อไทย
+
+    เป็นความผิดพลาดแบบเดียวกับที่เคยเกิดตอนใส่ "มา" ลงบัญชีคำต้องห้าม
+    """
+
+    @pytest.mark.parametrize(
+        "name", ["ประทีป", "ทีปกร", "ปทีป", "ทีน่า", "มาร์ที", "วีระ", "สาธิต"]
+    )
+    def test_ชื่อที่มีพยางค์เดียวกับคำขอต้องใช้ได้(self, name):
+        assert extract_name_claim(f"เรียก{name}ก็ได้ครับ", expecting_name=True) == name
+        assert extract_name_claim(f"หนูชื่อ{name}ค่ะ") == name
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "เรียกช่างมาหน่อยครับ",
+            "เรียกแท็กซี่ให้หน่อย",
+            "เรียกรถพยาบาลด่วน",
+            "เรียกช่างมาซิ",
+            "เรียกหมอมาช่วยที",
+        ],
+    )
+    def test_คำสั่งต้องยังถูกปฏิเสธ(self, text):
+        assert extract_name_claim(text, expecting_name=True) is None, text
