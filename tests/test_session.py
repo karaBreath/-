@@ -732,3 +732,19 @@ class Testห้ามสกัดความจำระหว่างรอ�
         session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
 
         assert สั่งไปแล้ว == [], "สั่งงานสกัดทั้งที่คำขอลบยังรอยืนยันอยู่"
+
+    def test_โมเดลล่มแล้วคำเตือนต้องยังถูกบันทึก(self, session, store):
+        """ผู้ใช้ได้ยินคำเตือนไปแล้วและสถานะก็เปลี่ยนไปแล้ว
+
+        ถ้าไม่บันทึกอะไรเลย ประวัติจะไม่มีร่องรอยว่าเคยเตือนเขา และเทิร์นถัดไป
+        จะยกเลิกคำขอลบทั้งที่เขาไม่เคยได้ยินคำเตือนสักครั้ง
+        """
+        speaker = session.register_speaker("เดช")
+        session.exchange("ลบความจำทั้งหมด", speaker=speaker, speak=False)
+
+        session.brain.client.fail_with = RuntimeError("โมเดลล่ม 529")
+        with pytest.raises(RuntimeError):
+            session.exchange("วันนี้อากาศเป็นยังไง", speaker=speaker, speak=False)
+
+        เนื้อหา = [t.content for t in store.recent_turns(speaker.id) if t.role == "assistant"]
+        assert any("ยังไม่ได้ลบ" in c for c in เนื้อหา), เนื้อหา

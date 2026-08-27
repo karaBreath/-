@@ -498,23 +498,34 @@ class ConversationSession:
                 speaker=speaker,
                 speech=self._speak(notice) if speak else None,
             )
-        for event in self.brain.stream(
-            transcript,
-            speaker,
-            voice_enabled=self.identifier.enabled,
-            history=history,
-        ):
-            if event.type == "delta":
-                yield SessionEvent("delta", text=event.text, speaker=speaker)
-            elif event.type == "chunk":
-                yield SessionEvent(
-                    "chunk",
-                    text=event.text,
-                    speaker=speaker,
-                    speech=self._speak(event.text) if speak else None,
+        try:
+            for event in self.brain.stream(
+                transcript,
+                speaker,
+                voice_enabled=self.identifier.enabled,
+                history=history,
+            ):
+                if event.type == "delta":
+                    yield SessionEvent("delta", text=event.text, speaker=speaker)
+                elif event.type == "chunk":
+                    yield SessionEvent(
+                        "chunk",
+                        text=event.text,
+                        speaker=speaker,
+                        speech=self._speak(event.text) if speak else None,
+                    )
+                elif event.type == "done":
+                    reply = event.text
+        except BaseException:
+            # ข้อความแจ้งเรื่องคำขอลบถูกส่งให้ผู้ใช้ไปแล้ว และสถานะก็เปลี่ยนไปแล้ว
+            # ถ้าโมเดลล่มตรงนี้แล้วเราไม่บันทึกอะไรเลย ประวัติจะไม่มีร่องรอยว่า
+            # เคยเตือนเขาไป เทิร์นถัดไปจะยกเลิกคำขอลบทั้งที่เขาไม่เคยได้ยินคำเตือน
+            if notice and speaker is not None:
+                self._note_assistant_reply(notice)
+                self.store.record_turn(
+                    speaker.id, self.session_id, "assistant", notice
                 )
-            elif event.type == "done":
-                reply = event.text
+            raise
 
         if notice:
             # คำตอบที่บันทึก/ตรวจต้องเป็นก้อนเดียวกับที่ผู้ใช้ได้ยินจริง
