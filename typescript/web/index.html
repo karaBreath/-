@@ -219,7 +219,13 @@ async function refreshSpeaker(speaker) {
   name.style.fontWeight = "600";
   speakerBox.append(
     name,
-    el("div", "empty", `คุยกันมาแล้ว ${speaker.turns ?? 0} ข้อความ`),
+    el(
+      "div",
+      "empty",
+      speaker.turns
+        ? `คุยกันมาแล้ว ${speaker.turns} ข้อความ`
+        : "ยังไม่เคยคุยกัน",
+    ),
   );
   forgetBtn.disabled = false;
 

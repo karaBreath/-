@@ -529,3 +529,39 @@ class Testคำบอกลาไม่ใช่ชื่อ:
     def test_ทางลัดของตัวตัดคำนำหน้าต้องไม่ข้ามด่านตรวจ(self):
         """`return None if "." in title else name` ข้ามการตรวจความยาวและคำต้องห้าม"""
         assert extract_name_claim("คุณาไม่ว่างค่ะ", expecting_name=True) is None
+
+
+class Testชื่อยาวและยศ:
+    """เพดานการจับต้องเผื่อคำลงท้ายที่ติดมาด้วย
+
+    ไม่งั้นชื่อยาว 12-15 ตัวอักษรถูกตัดกลางคำลงท้าย ตัวตัดคำลงท้ายจำไม่ได้
+    แล้วเศษที่เหลืออ่านออกเสียงไม่ได้เลย ("กิตติศักดิ์นะคร")
+    """
+
+    @pytest.mark.parametrize(
+        "utterance,name",
+        [
+            ("ผมชื่อกิตติศักดิ์นะครับ", "กิตติศักดิ์"),
+            ("ผมชื่อสมชายแซ่ลิ้มครับ", "สมชายแซ่ลิ้ม"),
+            ("ผมชื่อพงศ์พัฒน์ชัยครับ", "พงศ์พัฒน์ชัย"),
+        ],
+    )
+    def test_ชื่อยาวต้องไม่ถูกตัดกลางคำลงท้าย(self, utterance, name):
+        assert extract_name_claim(utterance) == name
+
+    def test_ยศทหารตำรวจต้องถูกตัดออก(self):
+        """คำนำหน้าแทนที่ "คุณ" ไม่ใช่ซ้อนใต้มัน — "คุณพล.ต.ต.วิชัย" ผิดหลักภาษา"""
+        assert extract_name_claim("ผมชื่อ พล.ต.ต.วิชัย ครับ") == "วิชัย"
+        assert extract_name_claim("ผมชื่ออาจารย์สมพงษ์ครับ") == "สมพงษ์"
+
+    def test_ยศล้วนๆไม่ใช่ชื่อ(self):
+        """ช่องว่างคั่นทำให้กฎจับได้แค่ยศ แล้วบอทเรียกเขาว่า "คุณร.ต.อ" """
+        assert extract_name_claim("ผมชื่อ ร.ต.อ. สมศักดิ์ ครับ") is None
+
+    @pytest.mark.parametrize("utterance", ["ผมชื่อหน่อยครับ", "หนูชื่อหน่อยค่ะ"])
+    def test_หน่อยเป็นชื่อเล่นไทยที่ใช้จริง(self, utterance):
+        assert extract_name_claim(utterance) == "หน่อย"
+
+    @pytest.mark.parametrize("utterance", ["ขอชื่อหน่อยครับ", "ช่วยบอกหน่อย"])
+    def test_คำขอที่ลงท้ายด้วยหน่อยยังไม่ใช่ชื่อ(self, utterance):
+        assert extract_name_claim(utterance) is None

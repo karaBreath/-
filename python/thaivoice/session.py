@@ -217,13 +217,15 @@ def _pending_summary(stats: "SpeakerStats") -> str:
         amount = "เรื่องเดียว" if stats.facts == 1 else f" {stats.facts} เรื่อง"
         parts.append(f"สิ่งที่จำไว้{amount}")
     if stats.turns > 0:
-        amount = "ข้อความเดียว" if stats.turns == 1 else f" {stats.turns} ข้อความ"
+        amount = (
+            "อีกหนึ่งข้อความ" if stats.turns == 1 else f" {stats.turns} ข้อความ"
+        )
         parts.append(f"บทสนทนา{amount}")
     if not parts:
         return "ทั้งหมด"
     if len(parts) == 1:
-        return f"ทั้งหมด ทั้ง{parts[0]} และบทสรุปที่เคยสรุปไว้"
-    return f"ทั้งหมด ทั้ง{parts[0]} ทั้ง{parts[1]} และบทสรุปที่เคยสรุปไว้"
+        return f"ทั้งหมด ทั้ง{parts[0]} และบทสรุปที่เคยบันทึกไว้"
+    return f"ทั้งหมด ทั้ง{parts[0]} ทั้ง{parts[1]} และบทสรุปที่เคยบันทึกไว้"
 
 
 def _removed_summary(removed: dict[str, int], particle: str = "ค่ะ") -> str:
@@ -238,7 +240,8 @@ def _removed_summary(removed: dict[str, int], particle: str = "ค่ะ") -> st
     parts: list[str] = []
     for count, noun, classifier in (
         (removed.get("facts", 0), "สิ่งที่จำไว้", "เรื่อง"),
-        (removed.get("summaries", 0), "บทสรุป", "ชุด"),
+        # "ชุด" ไม่ใช่ลักษณนามของบทสรุป
+        (removed.get("summaries", 0), "บทสรุป", "ฉบับ"),
         (removed.get("turns", 0), "บทสนทนาเก่า", "ข้อความ"),
     ):
         if count <= 0:
@@ -598,7 +601,7 @@ class ConversationSession:
             f"ขอยืนยันก่อน{particle} จะลบความจำเกี่ยวกับ{_address(speaker.call_name)}"
             f"{_pending_summary(stats)} "
             f"ลบแล้วกู้คืนไม่ได้ "
-            f"ส่วนเสียงที่ใช้จำว่าเป็นคุณจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี "
+            f"ส่วนลายเสียงที่ใช้จำว่าเป็นคุณจะยังอยู่ ถ้าอยากลบด้วยต้องลบทั้งบัญชี "
             f'ถ้าแน่ใจ พูดว่า "ยืนยัน" ได้เลย{particle}',
             speaker,
             speak,
