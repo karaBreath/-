@@ -286,7 +286,12 @@ export class FakeSpeechSynthesis {
     globalThis.speechSynthesis = {
       spoken,
       cancelled: 0,
-      getVoices: () => [],
+      // เบราว์เซอร์จริงคืนรายชื่อเสียงที่โหลดมาแล้ว และมักว่างในตอนแรก
+      // ของเดิมคืน [] เสมอ เส้นทางเลือกเสียงไทยจึงไม่เคยถูกทดสอบเลย
+      voices: [],
+      getVoices() {
+        return this.voices;
+      },
       listeners: [],
       addEventListener(type, handler) {
         // เบราว์เซอร์จริงกันตัวจัดการซ้ำให้เอง ของปลอมก็ต้องทำเหมือนกัน

@@ -397,6 +397,12 @@ export class ThaiSpeechSynthesis {
 
   /** ผูกตัวจัดการอีกครั้ง — เรียกซ้ำได้ addEventListener กันซ้ำให้เอง */
   listen(): void {
+    // ต้องเลือกเสียงใหม่ด้วย ไม่ใช่แค่ผูกตัวจัดการกลับ
+    //
+    // ถ้ารายชื่อเสียงมาถึงตอนที่ตัวจัดการถูกถอดไปแล้ว (ระหว่างกดหยุด)
+    // voiceschanged จะไม่ยิงอีกเลย เสียงไทยจึงไม่เคยถูกเลือก แล้ว Chrome
+    // อ่านข้อความไทยด้วยเสียงเริ่มต้นซึ่งมักเป็นอังกฤษ ฟังไม่รู้เรื่อง
+    this.pickVoice();
     globalThis.speechSynthesis?.addEventListener?.("voiceschanged", this.onVoices);
   }
 
@@ -570,7 +576,15 @@ export class VoiceConversation {
   private state: VoiceState = "idle";
   private running = false;
   /** promise ของ start() ที่กำลังทำงานอยู่ — ให้ผู้เรียกคนถัดไปรอได้ */
-  private starting: Promise<void> | null = null;
+  // คิวของ start/stop — ทั้งสองอย่างต้องทำทีละอันตามลำดับที่ผู้ใช้กด
+  //
+  // ของเดิมใช้ธง "กำลังเริ่มอยู่" แล้วให้ start() ตัวถัดไปรอ ซึ่งกัน start ซ้อน
+  // start ได้ แต่กัน stop ที่แทรกกลางไม่ได้เลย ลำดับ เริ่ม-หยุด-เริ่ม-หยุด
+  // (ซึ่ง React StrictMode ทำให้ทุก useEffect เป็นค่าเริ่มต้นในโหมด dev) ทำให้
+  // start ตัวที่สองตื่นขึ้นมาหลัง stop ตัวที่สอง เห็นว่ายังไม่ทำงานอยู่ แล้วเปิด
+  // ไมโครโฟนต่อ — ผู้ใช้กดหยุดแล้วแต่ไฟไมค์ยังติด และทุกอย่างที่พูดต่อจากนั้น
+  // ถูกถอดเสียงส่งขึ้นเซิร์ฟเวอร์
+  private lifecycle: Promise<void> = Promise.resolve();
   private recognitionPaused = false;
   /** เจอ error ที่เริ่มใหม่ไปก็ล้มซ้ำ — หยุดวนแล้วรอให้ผู้ใช้กดเริ่มใหม่เอง */
   private recognitionFatal = false;
@@ -629,22 +643,24 @@ export class VoiceConversation {
   }
 
   /** เริ่มฟัง */
-  async start(): Promise<void> {
-    // ต้องกันตั้งแต่ยังไม่เสร็จ ไม่ใช่กันตอน running กลายเป็น true
-    // เพราะช่วงรอสิทธิ์ไมโครโฟนกินเวลาได้หลายวินาที (ครั้งแรก หรือหูฟังบลูทูธ)
-    // ถ้าผู้ใช้กดปุ่มซ้ำในช่วงนั้น จะได้ไมโครโฟนสองตัวที่ปิดไม่ได้อีกเลย
-    // start() ที่มาระหว่างรอสิทธิ์ไมโครโฟนต้องรอผลของตัวก่อนหน้า ไม่ใช่คืนค่า
-    // ว่าสำเร็จทั้งที่ไม่ได้เริ่มอะไรเลย ของเดิมคืนเงียบ ๆ ผู้เรียกจึงเชื่อว่า
-    // บทสนทนาเริ่มแล้ว ทั้งที่ไม่มี recognizer สักตัว และไม่มี error ให้เห็น
-    if (this.starting) {
-      await this.starting;
-      if (this.running) return;
-    }
+  start(): Promise<void> {
+    // ต่อท้ายคิว ไม่ใช่แค่รอ — start() ที่มาระหว่างรอสิทธิ์ไมโครโฟนต้องได้ผล
+    // ของจริง ไม่ใช่คืนค่าว่าสำเร็จทั้งที่ไม่ได้เริ่มอะไรเลย และต้องไม่แซง
+    // stop() ที่ผู้ใช้กดไปก่อนหน้า
+    const run = this.lifecycle.then(
+      () => this.beginListening(),
+      () => this.beginListening(),
+    );
+    // คิวต้องเดินต่อได้แม้ตัวก่อนหน้าจะล้ม (ผู้ใช้ปฏิเสธสิทธิ์ไมโครโฟนแล้วกดใหม่)
+    this.lifecycle = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async beginListening(): Promise<void> {
     if (this.running) return;
-    let settle: () => void = () => {};
-    this.starting = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
     this.recognitionFatal = false;
     // เลื่อนรุ่นตอน *เริ่ม* ด้วย ไม่ใช่แค่ตอนปิด — ไม่งั้นหางของ cleanup ที่ยัง
     // ค้างอยู่ (รอปิดไมโครโฟน) จะเห็นรุ่นเดิม แล้วรื้อบทสนทนาใหม่ที่เพิ่งเริ่มทิ้ง
@@ -678,9 +694,6 @@ export class VoiceConversation {
     } catch (error) {
       await this.cleanup();
       throw error;
-    } finally {
-      this.starting = null;
-      settle();
     }
   }
 
@@ -842,7 +855,19 @@ export class VoiceConversation {
 
   /** หยุดบทสนทนาทั้งหมด */
   stop(): void {
-    void this.cleanup();
+    // ต่อท้ายคิวเดียวกับ start() ไม่งั้นการกดหยุดระหว่างที่ start ยังรอสิทธิ์
+    // ไมโครโฟนอยู่จะถูก start ตัวนั้นเขียนทับ แล้วไมโครโฟนเปิดค้างต่อไป
+    //
+    // ข้อผิดพลาดจาก cleanup ต้องไปทาง onError ไม่ใช่กลายเป็น unhandled
+    // rejection แดง ๆ ในคอนโซล (recorder.stop() โยนได้จริง)
+    this.lifecycle = this.lifecycle
+      .then(
+        () => this.cleanup(),
+        () => this.cleanup(),
+      )
+      .catch((error: unknown) => {
+        this.reportLater(error);
+      });
   }
 
   private async cleanup(): Promise<void> {
@@ -1218,10 +1243,21 @@ export class VoiceConversation {
    */
   private reportLater(error: unknown): void {
     try {
-      this.options.onError?.(error as Error);
+      if (this.options.onError) {
+        this.options.onError(error as Error);
+        return;
+      }
     } catch {
-      // ตัวจัดการ error พังเอง — ไม่เหลือช่องทางรายงานแล้ว
+      // ตัวจัดการ error ของผู้เรียกพังเอง — ตกไปใช้คอนโซลแทน
     }
+    // ไม่มีตัวจัดการ (หรือตัวจัดการพังเอง) ต้องไม่เงียบสนิท
+    //
+    // ของเดิมโยนใน macrotask ซึ่งในเบราว์เซอร์ไปโผล่ที่ window.onerror และ
+    // คอนโซล แต่ใน Node กลายเป็น uncaughtException การเปลี่ยนมาใช้ onError
+    // อย่างเดียวจึงแลก "เห็นแต่เสียงดัง" เป็น "เงียบสนิท" สำหรับผู้เรียกที่
+    // ไม่ได้ต่อ onError — ผู้ใช้เห็นแค่ "พูดแล้วบอทเงียบ" โดยไม่มีร่องรอยเลย
+    // eslint-disable-next-line no-console
+    console.error("ThaiVoice: เกิดข้อผิดพลาดที่ไม่มีผู้รับ", error);
   }
 
   private onPlaybackIdle(): void {

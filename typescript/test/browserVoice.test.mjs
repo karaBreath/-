@@ -1231,3 +1231,110 @@ describe("VoiceConversation — บัคที่เจอจากการต
     assert.equal(globalThis.speechSynthesis.listeners.length, ก่อน);
   });
 });
+
+describe("วงจรเริ่ม-หยุด", () => {
+  const client = () => new ThaiVoiceClient({ baseUrl: "http://x", sessionId: "t" });
+
+  test("กดเริ่ม-หยุด-เริ่ม-หยุด ระหว่างรอสิทธิ์ไมค์ ต้องจบที่ปิดสนิท", async () => {
+    // ลำดับนี้คือสิ่งที่ React StrictMode ทำให้ทุก useEffect ในโหมด dev
+    // ถ้า start ตัวที่สองแซง stop ตัวที่สอง ไมโครโฟนจะเปิดค้างและทุกอย่างที่
+    // ผู้ใช้พูดต่อจากนั้นถูกถอดเสียงส่งขึ้นเซิร์ฟเวอร์ทั้งที่กดหยุดไปแล้ว
+    FakeMedia.delay = 30;
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    const หนึ่ง = talk.start();
+    talk.stop();
+    const สอง = talk.start();
+    talk.stop();
+    await Promise.allSettled([หนึ่ง, สอง]);
+    await sleep(120);
+
+    assert.equal(talk.state, "idle", "กดหยุดแล้วต้องปิดจริง");
+    assert.equal(
+      FakeSpeechRecognition.instances.filter((r) => r.running).length,
+      0,
+      "เหลือ recognizer ที่ยังฟังเสียงผู้ใช้อยู่",
+    );
+    assert.equal(
+      FakeTrack.live,
+      0,
+      "ไมโครโฟนยังเปิดค้าง — ไฟไมค์ในเบราว์เซอร์ยังติด",
+    );
+  });
+
+  test("กดเริ่มซ้อนกันหลายครั้งเมื่อครั้งแรกล้ม ต้องไม่รั่วไมโครโฟน", async () => {
+    FakeMedia.delay = 20;
+    // ปฏิเสธเฉพาะครั้งแรก — ผู้ใช้กดไม่อนุญาต แล้วกดปุ่มรัว ๆ อีกสองที
+    const เดิม = globalThis.navigator.mediaDevices.getUserMedia;
+    let ครั้งที่ = 0;
+    globalThis.navigator.mediaDevices.getUserMedia = async (...args) => {
+      ครั้งที่ += 1;
+      if (ครั้งที่ === 1) {
+        await sleep(FakeMedia.delay);
+        throw new Error("NotAllowedError");
+      }
+      return เดิม(...args);
+    };
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    const ผล = await Promise.allSettled([talk.start(), talk.start(), talk.start()]);
+    globalThis.navigator.mediaDevices.getUserMedia = เดิม;
+    await sleep(60);
+
+    assert.equal(ผล[0].status, "rejected", "ครั้งแรกต้องล้มจริง");
+    assert.equal(FakeTrack.live, 1, "ไมโครโฟนรั่ว — เปิดไว้มากกว่าหนึ่งตัว");
+    assert.equal(talk.state, "listening");
+    talk.stop();
+    await sleep(60);
+    assert.equal(FakeTrack.live, 0);
+  });
+
+  test("ข้อผิดพลาดตอนปิดต้องไปทาง onError ไม่ใช่ค้างเป็น unhandled rejection", async () => {
+    const พบ = [];
+    const talk = new VoiceConversation(client(), {
+      serverTts: true,
+      onError: (e) => พบ.push(e),
+    });
+    await talk.start();
+    talk.recorder.stop = () => Promise.reject(new Error("InvalidAccessError"));
+    talk.stop();
+    await sleep(60);
+
+    assert.equal(พบ.length, 1, "ข้อผิดพลาดหายไป");
+    assert.equal(talk.state, "idle");
+  });
+
+  test("ผู้เรียกที่ไม่ได้ต่อ onError ต้องยังเห็นข้อผิดพลาดที่คอนโซล", async () => {
+    // ของเดิมโยนใน macrotask ซึ่งในเบราว์เซอร์ไปโผล่ที่ window.onerror
+    // การเปลี่ยนมาใช้ onError อย่างเดียวแลก "เห็นแต่เสียงดัง" เป็น "เงียบสนิท"
+    // ผู้ใช้เห็นแค่ "พูดแล้วบอทเงียบ" โดยไม่มีร่องรอยให้ไล่เลย
+    const เดิม = console.error;
+    const เห็น = [];
+    console.error = (...args) => เห็น.push(args);
+    try {
+      const talk = new VoiceConversation(client(), { serverTts: true });
+      await talk.start();
+      talk.recorder.stop = () => Promise.reject(new Error("InvalidAccessError"));
+      talk.stop();
+      await sleep(60);
+    } finally {
+      console.error = เดิม;
+    }
+
+    assert.equal(เห็น.length, 1, "ข้อผิดพลาดหายเงียบสนิท");
+  });
+
+  test("เสียงไทยที่โหลดมาหลังกดหยุดต้องถูกเลือกเมื่อเริ่มใหม่", async () => {
+    // ถ้ารายชื่อเสียงมาถึงตอนตัวจัดการถูกถอดไปแล้ว voiceschanged จะไม่ยิงอีก
+    // Chrome จะอ่านข้อความไทยด้วยเสียงเริ่มต้นซึ่งมักเป็นอังกฤษ
+    globalThis.speechSynthesis.voices = [];
+    const talk = new VoiceConversation(client(), { sendAudioForSpeakerId: false });
+    await talk.start();
+    talk.stop();
+    await sleep(30);
+
+    globalThis.speechSynthesis.voices = [{ lang: "th-TH", name: "Kanya" }];
+    await talk.start();
+    assert.equal(talk.synth.voice?.name, "Kanya", "ไม่ได้เลือกเสียงไทย");
+    talk.stop();
+    await sleep(30);
+  });
+});
