@@ -1384,3 +1384,68 @@ class Testตัดท่อนระหว่างสตรีมต้อง�
         ท่อน = self._สตรีม("9" * 400)
         assert "".join(ท่อน) == "9" * 400
         assert all(len(c) > 1 for c in ท่อน[:-1]), [len(c) for c in ท่อน]
+
+
+class Testตัวย่อไทยต้องไม่ถูกตัดกลางคำ:
+    """`_SENT_END` ยิงใส่จุดที่มีพยัญชนะสองตัวนำหน้า
+
+    "มี.ค." "ก.พ." รอดเพราะตัวหน้าจุดเป็นสระหรือพยัญชนะตัวเดียว แต่ "เม.ย."
+    "ตร.ม." "ลบ.ซม." ไม่รอด — พังเฉพาะบางตัวจึงจับได้ยากกว่า
+    """
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ประชุมวันที่ 5 เม.ย. 2569 นะครับ", "เมษายน"),
+            ("ห้องนี้พื้นที่ 120 ตร.ม. ราคาสูง", "ตารางเมตร"),
+            ("รถวิ่งเร็ว 90 กม./ชม. ครับ", "กิโลเมตร ต่อ ชั่วโมง"),
+            ("ปริมาตร 500 ลบ.ซม. ครับ", "ลูกบาศก์เซนติเมตร"),
+            ("เกิดปี พ.ศ. 2540 ครับ", "พุทธศักราช"),
+        ],
+    )
+    def test_ต้องไม่ถูกตัดแล้วอ่านทีละพยางค์(self, text, expected):
+        assert split_sentences(text) == [text], split_sentences(text)
+        assert expected in clean_for_speech(text)
+
+    def test_รายการตัวย่อสร้างจากตารางจริง(self):
+        """ไล่พิมพ์มือแล้วรอบหน้าที่เพิ่มหน่วยใหม่จะพังซ้ำที่เดิม"""
+        from thaivoice.thai_text import _MONTH_ABBR, _THAI_ABBREVIATIONS
+
+        for abbreviation in _MONTH_ABBR:
+            assert abbreviation.split(".")[0] in _THAI_ABBREVIATIONS, abbreviation
+
+
+class Testทับที่แปลว่าต่อกับทับที่แปลว่าหรือ:
+    @pytest.mark.parametrize(
+        "text",
+        ["กรอกวัน/เดือน/ปีเกิด", "ระบุสถานที่/เวลานัดหมาย", "แบบรายวัน/รายเดือน"],
+    )
+    def test_ไม่มีจำนวนกำกับต้องไม่อ่านว่าต่อ(self, text):
+        """"วัน/เดือน/ปีเกิด" เป็นสำนวนไทยที่พบทุกวัน "/" ตรงนั้นแปลว่า "หรือ" """
+        assert "ต่อ" not in clean_for_speech(text), clean_for_speech(text)
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ซื้อ 50 บาท/กก.", "ห้าสิบ บาท ต่อ กิโลกรัม"),
+            ("ทานยา 2 เม็ด/วัน", "สอง เม็ด ต่อ วัน"),
+            ("ราคา 1,200 บาท/ตร.ม.", "หนึ่งพันสองร้อย บาท ต่อ ตารางเมตร"),
+        ],
+    )
+    def test_มีจำนวนกำกับต้องอ่านว่าต่อและตัวเลขต้องไม่หาย(self, text, expected):
+        assert expected in clean_for_speech(text)
+
+
+class Testช่วงตัวเลขกับสกอร์การแข่งขัน:
+    @pytest.mark.parametrize(
+        "text",
+        ["ได้คะแนนสอบระหว่าง 85-90 คะแนน", "คะแนนเฉลี่ยอยู่ที่ 70-80"],
+    )
+    def test_คำบอกช่วงต้องชนะบริบทคะแนน(self, text):
+        """"ต่อ" แปลว่าสกอร์การแข่งขัน ความหมายคนละเรื่องกับช่วง"""
+        got = clean_for_speech(text)
+        assert "ถึง" in got and "ต่อ" not in got, got
+
+    @pytest.mark.parametrize("text", ["ทีมชนะ 3-1", "ผลบอล 2-1"])
+    def test_สกอร์จริงต้องยังอ่านว่าต่อ(self, text):
+        assert "ต่อ" in clean_for_speech(text)
