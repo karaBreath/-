@@ -1411,16 +1411,22 @@ describe("วงจรเริ่ม-หยุด", () => {
   });
 
   test("ปล่อยปุ่มพูดหลังกดหยุด ต้องไม่อัปโหลดเสียงต่อ", async () => {
+    // โหมดกดพูดส่งผ่าน HTTP (client.voice) ไม่ใช่ WebSocket — ต้องนับช่องนั้น
     const talk = new VoiceConversation(client(), { serverTts: true });
     await talk.start();
+    let เรียกไปกี่ครั้ง = 0;
+    talk.client.voice = async () => {
+      เรียกไปกี่ครั้ง += 1;
+      return { text: "", reply: "", speaker: null };
+    };
     talk.pushToTalkStart();
+    talk.recorder = { take: () => new Blob(["x"]), reset() {}, stop: async () => null };
     await sleep(10);
     talk.stop();
-    const ก่อน = FakeWebSocket.instances.length;
     await talk.pushToTalkStop();
     await sleep(80);
 
-    assert.equal(FakeWebSocket.instances.length, ก่อน, "เปิดการเชื่อมต่อใหม่หลังกดหยุด");
+    assert.equal(เรียกไปกี่ครั้ง, 0, "ส่งเสียงขึ้นเซิร์ฟเวอร์หลังผู้ใช้กดหยุด");
     assert.equal(talk.state, "idle");
   });
 
@@ -1460,20 +1466,20 @@ describe("วงจรเริ่ม-หยุด", () => {
     // ไม่ได้เพราะมันเก็บค่าหลัง stop() เลื่อนไปแล้ว
     const talk = new VoiceConversation(client(), { serverTts: true });
     await talk.start();
+    let เรียกไปกี่ครั้ง = 0;
+    talk.client.voice = async () => {
+      เรียกไปกี่ครั้ง += 1;
+      return { text: "", reply: "", speaker: null };
+    };
     talk.pushToTalkStart();
     FakeAudioContext.instances.at(-1).emit(new Float32Array(1600));
     await sleep(10);
 
-    const ก่อน = FakeWebSocket.instances.length;
     talk.stop();
     await talk.pushToTalkStop();
     await sleep(100);
 
-    assert.equal(
-      FakeWebSocket.instances.length,
-      ก่อน,
-      "ส่งเสียงขึ้นเซิร์ฟเวอร์หลังผู้ใช้กดหยุด",
-    );
+    assert.equal(เรียกไปกี่ครั้ง, 0, "ส่งเสียงขึ้นเซิร์ฟเวอร์หลังผู้ใช้กดหยุด");
   });
 
   test("กดหยุดตอนไมค์ถูกพัก แล้วเริ่มใหม่ ต้องยังพักไมค์ตอนบอทพูด", async () => {
@@ -1519,6 +1525,134 @@ describe("วงจรเริ่ม-หยุด", () => {
 
     const เปิดค้าง = FakeWebSocket.instances.filter((w) => w.readyState < 2);
     assert.equal(เปิดค้าง.length, 0, "socket ค้างเปิดหลังกดหยุด");
+  });
+
+  test("กดเริ่มที่ค้างคิวอยู่ ต้องไม่ทับเซสชันที่ยังมีชีวิต", async () => {
+    // stop() ปิดธง running ทันที แต่ cleanup() ยังต่อท้ายคิว ถ้ามี start()
+    // เข้าคิวไว้ก่อน stop() ตัวนั้นจะตื่นมาเห็น running เป็น false ทั้งที่
+    // ตัวอัดเสียงและตัวถอดเสียงเดิมยังมีชีวิต แล้วเขียนทับโดยไม่ปิดของเก่า
+    // ของเก่ากลายเป็นผีที่ยังฟังเสียงผู้ใช้และส่งขึ้นเซิร์ฟเวอร์ต่อ
+    FakeMedia.delay = 20;
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    await talk.start();
+
+    const ค้างคิว = talk.start();
+    talk.stop();
+    await Promise.allSettled([ค้างคิว]);
+    await sleep(200);
+
+    assert.equal(talk.state, "idle");
+    assert.equal(FakeTrack.live, 0, "ไมโครโฟนค้างเปิด");
+    assert.equal(FakeAudioContext.live, 0, "AudioContext ค้างเปิด");
+    assert.equal(
+      FakeSpeechRecognition.instances.filter((r) => r.running).length,
+      0,
+      "เหลือ recognizer ผีที่ยังฟังอยู่",
+    );
+  });
+
+  test("คำตอบโหมดกดพูดที่กลับมาหลังกดหยุด ต้องไม่ปลุกเซสชันที่ปิดแล้ว", async () => {
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    await talk.start();
+    let ปล่อย;
+    talk.client.voice = () =>
+      new Promise((resolve) => {
+        ปล่อย = () => resolve({ text: "ก", reply: "ข", speaker: null });
+      });
+    talk.pushToTalkStart();
+    talk.recorder = { take: () => new Blob(["x"]), reset() {}, stop: async () => null };
+
+    const รอ = talk.pushToTalkStop();
+    await sleep(10);
+    talk.stop();
+    await sleep(10);
+    ปล่อย();
+    await รอ;
+    await sleep(60);
+
+    assert.equal(talk.state, "idle", "คำตอบที่มาช้าปลุกเซสชันที่ปิดแล้ว");
+  });
+
+  test("ตัวนับคำขอที่ค้างต้องถูกล้าง ไม่งั้นเซสชันถัดไปค้างที่กำลังพูด", async () => {
+    // finally ของโหมดกดพูดไม่ลดตัวนับเมื่อรุ่นไม่ตรงแล้ว ถ้า cleanup ไม่ล้าง
+    // ค่าจะค้าง > 0 ตลอด แล้ว maybeFinish() คืนก่อนเสมอ ไมค์ไม่กลับมาเลย
+    const talk = new VoiceConversation(client(), { serverTts: true });
+    await talk.start();
+    let ปล่อย;
+    talk.client.voice = () =>
+      new Promise((resolve) => {
+        ปล่อย = () => resolve({ text: "ก", reply: "ข", speaker: null });
+      });
+    talk.pushToTalkStart();
+    talk.recorder = { take: () => new Blob(["x"]), reset() {}, stop: async () => null };
+    const รอ = talk.pushToTalkStop();
+    await sleep(10);
+    talk.stop();
+    ปล่อย();
+    await รอ;
+    await sleep(60);
+
+    // เซสชันใหม่บนอ็อบเจกต์เดิม ต้องจบเทิร์นได้ตามปกติ
+    FakeWebSocket.openDelay = 5;
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+    recognition.emitFinal("สวัสดี");
+    await sleep(30);
+    FakeWebSocket.instances.at(-1).emit({ type: "done", text: "ตอบแล้ว" });
+    await sleep(80);
+
+    assert.equal(talk.state, "listening", "เซสชันใหม่ค้างที่ 'กำลังพูด'");
+    talk.stop();
+    await sleep(60);
+  });
+
+  test("close ของ socket เก่าที่มาถึงช้า ต้องไม่ล้างสถานะของตัวที่ใช้อยู่", async () => {
+    // การเชื่อมต่อที่ล้มยิง error ก่อน แล้ว close ตามมาทีหลัง ถ้าล้างสถานะตอน
+    // close โดยไม่เช็คว่าเป็นตัวที่ใช้อยู่จริงไหม มันจะไปล้างตัวใหม่แทน
+    // แล้วเทิร์นถัดไปเปิด socket เพิ่มอีกตัว กลายเป็นสองตัวเปิดพร้อมกัน
+    //
+    // ต้องมีเทิร์นที่ *สาม* ถึงจะเห็นผล เพราะผลของการถอดยามคือสถานะถูกล้างทิ้ง
+    // ส่วนการทิ้งเทิร์นที่ค้างไม่เจอตัวที่ตรงเลยเงียบไป
+    FakeMedia.delay = 5;
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+      onError: () => {},
+    });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+
+    recognition.emitFinal("หนึ่ง");
+    await sleep(60);
+    const เก่า = FakeWebSocket.instances.at(-1);
+    เก่า.emit({ type: "done", text: "ตอบหนึ่ง" });
+    await sleep(30);
+    // เซิร์ฟเวอร์ตัดการเชื่อมต่อ — ใช้ไม่ได้แล้วแต่ close ยังไม่ถูกส่งถึง
+    เก่า.readyState = 3;
+
+    recognition.emitFinal("สอง");
+    await sleep(80);
+    const ใหม่ = FakeWebSocket.instances.at(-1);
+    assert.notEqual(ใหม่, เก่า, "ต้องเปิดการเชื่อมต่อใหม่");
+
+    // close ของตัวที่ตายเพิ่งมาถึง — หลังตัวใหม่เปิดใช้งานแล้ว
+    เก่า._fire("close", {});
+    await sleep(20);
+    ใหม่.emit({ type: "done", text: "ตอบสอง" });
+    await sleep(30);
+
+    recognition.emitFinal("สาม");
+    await sleep(80);
+
+    const เปิดพร้อมกัน = FakeWebSocket.instances.filter((w) => w.readyState === 1);
+    assert.equal(เปิดพร้อมกัน.length, 1, "มี socket เปิดพร้อมกันมากกว่าหนึ่งตัว");
+    assert.ok(
+      ใหม่.sent.some((m) => m.text === "สาม"),
+      "เทิร์นที่สามไม่ได้ใช้การเชื่อมต่อเดิม",
+    );
+    talk.stop();
+    await sleep(120);
   });
 
   test("cleanup ต้องปลดตัวจัดการของ recognizer ให้ครบทุกตัว", async () => {
