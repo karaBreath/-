@@ -978,6 +978,7 @@ export class VoiceConversation {
     //
     // ยาม generation ข้างล่างช่วยไม่ได้ เพราะมันเก็บค่า *หลัง* stop() เลื่อนไป
     // แล้ว มันรอดมาได้เพราะ cleanup() บังเอิญเลื่อนซ้ำอีกรอบเท่านั้น
+    if (!this.running) return;
     const wav = this.recorder?.take() ?? null;
     if (!wav) return;
 
