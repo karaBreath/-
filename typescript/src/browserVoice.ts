@@ -501,6 +501,12 @@ export interface VoiceConversationOptions extends VoiceConversationHandlers {
    * ต้องใส่หูฟัง ไม่งั้นไมโครโฟนจะได้ยินเสียงบอทเองแล้วตัดตัวเองทันทีที่เริ่มพูด
    * ค่าเริ่มต้นคือปิด ซึ่งจะ *หยุดฟัง* ระหว่างบอทพูด เพื่อไม่ให้ระบบถอดเสียงของ
    * ตัวเองแล้วตอบตัวเองวนไม่จบ และไม่ให้เสียงบอทถูกนำไปสะสมเป็นลายเสียงของผู้ใช้
+   *
+   * **คำเตือน** โหมดนี้ไม่เคยล้างบัฟเฟอร์เสียงระหว่างเทิร์น เพราะการล้างผูกอยู่
+   * กับการ "กลับมาฟัง" ซึ่งไม่เคยเกิดเมื่อไม่เคยหยุดฟัง ถ้าไม่ได้ใส่หูฟัง
+   * เสียงบอทที่สะท้อนเข้าไมโครโฟนจะถูกอัปโหลดไปพร้อมประโยคถัดไปของผู้ใช้ และ
+   * ถูกนำไปสะสมเป็นลายเสียง ทำให้ระบบจำผู้ใช้ผิดคนเพี้ยนไปเรื่อย ๆ อย่างถาวร
+   * ใช้โหมดนี้เฉพาะเมื่อมั่นใจว่าผู้ใช้ใส่หูฟัง
    */
   bargeIn?: boolean;
 }
@@ -765,9 +771,18 @@ export class VoiceConversation {
         // AudioContext ยังเปิดค้าง (ไฟไมค์ในเบราว์เซอร์ยังติด) และ start()
         // ก็ไม่ทำอะไรเพราะติดเงื่อนไข running — ผู้ใช้ทำตามที่ข้อความบอกไม่ได้
         const message = FATAL_RECOGNITION_MESSAGES[code] ?? code;
-        void this.cleanup().finally(() => {
-          this.options.onError?.(new Error(message));
-        });
+        // ต้องดัก cleanup ด้วย ไม่ใช่แค่ finally — ถ้าตัวจัดการของผู้เรียกโยน
+        // ระหว่างรื้อ มันจะกลายเป็น unhandled rejection ที่บังข้อความจริงที่
+        // ผู้ใช้ต้องเห็น ("เบราว์เซอร์ไม่อนุญาตให้ใช้ไมโครโฟน")
+        void this.cleanup()
+          .catch((error: unknown) => this.reportLater(error))
+          .finally(() => {
+            try {
+              this.options.onError?.(new Error(message));
+            } catch (error) {
+              this.reportLater(error);
+            }
+          });
         return;
       }
       this.options.onError?.(new Error(`ถอดเสียงผิดพลาด: ${code}`));
@@ -779,8 +794,12 @@ export class VoiceConversation {
       // ตามสเปก abort() ยิง end แบบ asynchronous ถ้าผู้ใช้กดหยุดแล้วกดเริ่มใหม่
       // ก่อนเหตุการณ์นั้นจะมาถึง ตัวเก่าจะปลุกตัวเองกลับมาทำงาน กลายเป็นสอง
       // recognizer พร้อมกัน แล้ว pauseRecognition หยุดได้แค่ตัวใหม่ ตัวเก่าจึง
-      // ฟังต่อระหว่างบอทพูด ถอดเสียงบอทเอง แล้วส่งกลับไปเป็นเทิร์นใหม่ —
-      // บทสนทนาวนไม่จบที่แก้ไปแล้วรอบก่อน
+      // ฟังต่อระหว่างบอทพูด ถอดเสียงบอทเอง แล้วส่งกลับไปเป็นเทิร์นใหม่
+      //
+      // หมายเหตุ: วัดแล้วสองบรรทัดนี้ *ไปไม่ถึง* ในโครงสร้างปัจจุบัน — cleanup()
+      // ปลด onend แบบซิงโครนัสก่อน abort() เสมอ และเกราะใน beginListening
+      // กันไม่ให้สร้าง recognizer ซ้อน เก็บไว้เป็นตาข่ายเผื่อลำดับนั้นเปลี่ยน
+      // แต่อย่าเข้าใจผิดว่ามันคือสิ่งที่กันลูปอยู่ตอนนี้
       if (this.recognition !== recognition) return;
       if (this.recognitionFatal) return; // เริ่มใหม่ไปก็ล้มแบบเดิม
       if (this.running && !this.recognitionPaused) {
@@ -944,17 +963,26 @@ export class VoiceConversation {
     // ถูกบทสนทนาใหม่ใช้ต่อ (คำตอบของเทิร์นเก่าไปโผล่เป็นคำตอบของประโยคใหม่)
     // และตัวนับชิ้นเสียงของเบราว์เซอร์ก็ไม่ถูกล้าง ทำให้เทิร์นใหม่ปิดไม่ลง
     // ทำแบบซิงโครนัสไม่มีช่องให้แทรกตั้งแต่ต้น จึงไม่ต้องมียามเลย
-    this.audio.stop();
-    this.synth.stop();
-    this.synth.dispose();
-    this.stream?.close();
-    this.stream = null;
-    this.streamReady = null;
-    this.setState("idle");
-
-    const recorder = this.recorder;
-    this.recorder = null;
-    await recorder?.stop();
+    try {
+      this.audio.stop();
+      this.synth.stop();
+      this.synth.dispose();
+      this.stream?.close();
+      this.stream = null;
+      this.streamReady = null;
+      // setState เรียกตัวจัดการของผู้เรียก ซึ่งโยนได้ — ต้องอยู่ใน try
+      this.setState("idle");
+    } finally {
+      // ต้องคืนไมโครโฟนเสมอ แม้ตัวจัดการของผู้เรียกจะโยน
+      //
+      // ของเดิมปล่อยตัวอัดนอก try ถ้า onStateChange โยน cleanup จะหยุดตรงนั้น
+      // ไมโครโฟนกับ AudioContext ค้างเปิด (ไฟไมค์ในเบราว์เซอร์ไม่ดับ) และ
+      // เพราะเกราะใน beginListening ห้ามเขียนทับตัวอัดที่ยังมีชีวิต ผู้ใช้จะ
+      // กด "เริ่มคุย" ใหม่ไม่ได้อีกเลย — start() คืนค่าว่าสำเร็จแบบเงียบ ๆ
+      const recorder = this.recorder;
+      this.recorder = null;
+      await recorder?.stop();
+    }
   }
 
   /**

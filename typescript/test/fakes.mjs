@@ -135,11 +135,16 @@ export class FakeWebSocket {
     FakeWebSocket.instances.push(this);
     // unref เพื่อให้ openDelay ที่ตั้งไว้นาน ๆ (จำลองการจับมือที่ค้าง)
     // ไม่กันไม่ให้โปรเซสของเทสต์จบ
-    const timer = setTimeout(() => {
+    this._openTimer = setTimeout(() => {
+      // ถูกปิดไประหว่างจับมือแล้ว — เบราว์เซอร์จริงไม่เปิดย้อนหลัง
+      //
+      // ของเดิมตั้ง readyState กลับเป็น 1 แล้วยิง open ทำให้ฉาก "เซิร์ฟเวอร์
+      // ตัดตอนจับมือ" กลายเป็น "ต่อสำเร็จ" ซึ่งกลับหัวกลับหางกับความจริง
+      if (this.readyState !== 0) return;
       this.readyState = 1; // OPEN
       this._fire("open", {});
     }, FakeWebSocket.openDelay);
-    timer.unref?.();
+    this._openTimer.unref?.();
   }
 
   addEventListener(type, handler) {
@@ -175,6 +180,7 @@ export class FakeWebSocket {
   close() {
     if (this.readyState === 3) return;
     this.readyState = 3;
+    clearTimeout(this._openTimer);
     queueMicrotask(() => this._fire("close", {}));
   }
 
@@ -275,6 +281,20 @@ export class FakeSpeechRecognition {
     results.length = texts.length;
     this.onresult?.({ resultIndex: 0, results: { ...results, length: texts.length } });
   }
+
+  /**
+   * Chrome จบการถอดเสียงเองเป็นระยะแม้ตั้ง continuous = true
+   *
+   * `onend` มาถึงโดยไม่มีใครสั่ง ซึ่งเป็นเหตุผลเดียวที่บล็อกสั่งเริ่มใหม่ใน
+   * `onend` มีอยู่ ของปลอมเดิมยิง `onend` เฉพาะตอน stop()/abort() ซึ่งตอนนั้น
+   * ตัวจัดการถูกปลดหรือไมค์ถูกพักไปแล้วเสมอ บล็อกนั้นจึงไม่เคยถูกรันเลย
+   */
+  endSpontaneously() {
+    if (!this.running) return false;
+    this.running = false;
+    this.onend?.();
+    return true;
+  }
 }
 
 /**
@@ -313,11 +333,33 @@ export class FakeSpeechSynthesis {
           (l) => !(l.type === type && l.handler === handler),
         );
       },
+      /** ชิ้นที่ยังพูดไม่จบ — ใช้ยิง error ตอนถูกยกเลิกเหมือนเบราว์เซอร์จริง */
+      speaking: [],
+      /** ตั้งเป็น false ถ้าเทสต์อยากคุมจังหวะ onend เอง */
+      autoEnd: true,
       speak(utterance) {
         spoken.push(utterance);
+        this.speaking.push(utterance);
+        // เบราว์เซอร์จริงยิง end เมื่อพูดจบ ของเดิมไม่ยิงเลย ตัวนับชิ้นที่ค้าง
+        // จึงไม่เคยลดลง และยามที่กันชิ้นเก่าไม่ให้ขโมยการนับของชิ้นใหม่
+        // กลายเป็นโค้ดที่ไม่มีทางถูกรัน
+        if (!this.autoEnd) return;
+        setTimeout(() => {
+          const at = this.speaking.indexOf(utterance);
+          if (at < 0) return; // ถูกยกเลิกไปก่อนแล้ว
+          this.speaking.splice(at, 1);
+          utterance.onend?.();
+        }, 5);
       },
       cancel() {
         this.cancelled += 1;
+        // เบราว์เซอร์จริงยิง error ให้ทุกชิ้นที่ค้าง *เป็น task* ไม่ใช่ microtask
+        // ลำดับนี้สำคัญ เพราะโค้ดจริงเรียก speak() ชิ้นใหม่แบบซิงโครนัสต่อจาก
+        // cancel() ถ้าใช้ microtask จะแยกชิ้นเก่ากับชิ้นใหม่ไม่ออก
+        const ค้างอยู่ = this.speaking.splice(0);
+        setTimeout(() => {
+          for (const utterance of ค้างอยู่) utterance.onerror?.({ error: "canceled" });
+        }, 0);
       },
     };
   }

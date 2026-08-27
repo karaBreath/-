@@ -590,6 +590,9 @@ describe("VoiceConversation — บัคที่เจอจากการต
   test("ชิ้นเสียงที่ยิงทั้ง error และ end ต้องไม่ทำให้ไมค์เปิดกลางประโยค", async () => {
     // เครื่องสังเคราะห์เสียงส่วนใหญ่ยิงทั้งสองเหตุการณ์เมื่อชิ้นถูกขัดจังหวะ
     // ของเดิมลดตัวนับสองครั้งต่อชิ้นเดียว ไปขโมยการนับของชิ้นอื่น
+    //
+    // เทสต์นี้คุมจังหวะเหตุการณ์เอง จึงปิดการยิง end อัตโนมัติของของปลอม
+    globalThis.speechSynthesis.autoEnd = false;
     const { talk, recognition } = await started({ bargeIn: false, serverTts: false });
     recognition.emitFinal("ถาม");
     await sleep(30);
@@ -1653,6 +1656,127 @@ describe("วงจรเริ่ม-หยุด", () => {
     );
     talk.stop();
     await sleep(120);
+  });
+
+  test("ตัวจัดการสถานะที่โยนตอนปิด ต้องไม่ทิ้งไมค์ค้างและต้องเริ่มใหม่ได้", async () => {
+    // setState เรียกตัวจัดการของผู้เรียก ซึ่งโยนได้ (React ที่ unmount ไปแล้ว,
+    // DOM ที่ถูกถอด) ถ้าการปล่อยตัวอัดอยู่นอก try cleanup จะหยุดตรงนั้น
+    // ไมโครโฟนค้างเปิด และเกราะใน beginListening ก็ล็อกไม่ให้เริ่มใหม่ได้อีกเลย
+    const พบ = [];
+    let โยนตอนปิด = false;
+    const talk = new VoiceConversation(client(), {
+      serverTts: true,
+      onError: (e) => พบ.push(e.message),
+      onStateChange: (s) => {
+        if (s === "idle" && โยนตอนปิด) throw new Error("ตัวจัดการของผู้เรียกพัง");
+      },
+    });
+    await talk.start();
+
+    โยนตอนปิด = true;
+    talk.stop();
+    await sleep(120);
+
+    assert.equal(FakeTrack.live, 0, "ไมโครโฟนค้างเปิดหลังตัวจัดการโยน");
+    assert.equal(FakeAudioContext.live, 0, "AudioContext ค้างเปิด");
+    assert.ok(พบ.length > 0, "ข้อผิดพลาดหายเงียบ");
+
+    // ผู้ใช้กด "เริ่มคุย" ใหม่บนอ็อบเจกต์เดิม
+    โยนตอนปิด = false;
+    await talk.start();
+    await sleep(80);
+    assert.equal(talk.state, "listening", "เริ่มบทสนทนาใหม่ไม่ได้อีกเลย");
+    talk.stop();
+    await sleep(80);
+  });
+
+  test("ถอดเสียงล้มแบบแก้ไม่ได้ ต้องไม่กลายเป็น unhandled rejection", async () => {
+    const rejections = [];
+    const onRejection = (e) => rejections.push(e);
+    process.on("unhandledRejection", onRejection);
+    try {
+      // ทั้งสองทาง: onError ของผู้เรียกโยน และ cleanup เองก็ reject
+      // (เพราะ onStateChange โยนระหว่างรื้อ)
+      let เริ่มโยน = false;
+      const talk = new VoiceConversation(client(), {
+        serverTts: true,
+        onError: () => {
+          if (เริ่มโยน) throw new Error("ผู้เรียกพัง");
+        },
+        onStateChange: (state) => {
+          if (state === "idle" && เริ่มโยน) throw new Error("ผู้เรียกพัง onStateChange");
+        },
+      });
+      await talk.start();
+      เริ่มโยน = true;
+      const recognition = FakeSpeechRecognition.instances.at(-1);
+      recognition.onerror?.({ error: "not-allowed" });
+      await sleep(150);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+    assert.deepEqual(rejections, [], "มี unhandled rejection หลุดออกมา");
+  });
+
+  test("ตัวถอดเสียงที่จบเองต้องถูกสั่งฟังต่อ", async () => {
+    // Chrome จบการถอดเสียงเองเป็นระยะแม้ตั้ง continuous = true
+    // บล็อกสั่งเริ่มใหม่ใน onend คือสิ่งเดียวที่ทำให้ยังฟังต่อ ถ้าหายไป
+    // ป้ายบนหน้าเว็บบอก "กำลังฟัง" แต่ไมค์ตายไปแล้ว ไม่มี error ไม่มีร่องรอย
+    const talk = new VoiceConversation(client(), { sendAudioForSpeakerId: false });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+    const ก่อน = recognition.started;
+
+    assert.ok(recognition.endSpontaneously(), "ต้องกำลังฟังอยู่ก่อน");
+    await sleep(60);
+
+    assert.ok(recognition.started > ก่อน, "ไม่ได้สั่งฟังต่อหลังจบเอง");
+    assert.equal(recognition.running, true);
+    talk.stop();
+    await sleep(60);
+  });
+
+  test("ตัวถอดเสียงที่จบเองตอนบอทพูด ต้องไม่ฟื้นขึ้นมาเอง", async () => {
+    // ฟื้นตอนนั้นคือเปิดไมค์ขณะบอทกำลังพูด = ลูปได้ยินเสียงตัวเอง
+    FakeWebSocket.openDelay = 5;
+    const talk = new VoiceConversation(client(), {
+      sendAudioForSpeakerId: false,
+      serverTts: true,
+    });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+    recognition.emitFinal("สวัสดี");
+    await sleep(30);
+    FakeWebSocket.instances.at(-1).emit({
+      type: "chunk",
+      text: "บอทกำลังพูด",
+      audio: "QUFB",
+    });
+    await sleep(10);
+
+    const ก่อน = recognition.started;
+    recognition.endSpontaneously();
+    await sleep(60);
+
+    assert.equal(recognition.started, ก่อน, "ฟื้นไมค์ขึ้นมาขณะบอทพูด");
+    talk.stop();
+    await sleep(80);
+  });
+
+  test("ตัวถอดเสียงที่จบเองหลังกดหยุด ต้องไม่ปลุกอะไร", async () => {
+    const talk = new VoiceConversation(client(), { sendAudioForSpeakerId: false });
+    await talk.start();
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+    talk.stop();
+    await sleep(100);
+
+    const ก่อน = recognition.started;
+    recognition.running = true; // จำลองว่า onend ยังมาถึงทีหลัง
+    recognition.endSpontaneously();
+    await sleep(60);
+
+    assert.equal(recognition.started, ก่อน);
+    assert.equal(talk.state, "idle");
   });
 
   test("cleanup ต้องปลดตัวจัดการของ recognizer ให้ครบทุกตัว", async () => {
